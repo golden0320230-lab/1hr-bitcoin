@@ -1,0 +1,19 @@
+You are scoring a news article for likely Bitcoin price impact over the next 60 minutes.
+
+Return JSON only with this exact schema:
+{
+  "sentiment": "bullish" | "bearish" | "neutral",
+  "relevance": 0.0-1.0,
+  "impact_horizon_minutes": 1-240,
+  "impact_score": -1.0 to 1.0,
+  "confidence": 0.0-1.0,
+  "reason": "short explanation"
+}
+
+Rules:
+- Focus only on short-horizon BTC impact.
+- Ignore stale, generic, or weakly related stories.
+- Use "neutral" with low impact when the article is not materially relevant.
+- Do not include markdown fences.
+- Do not include any text before or after the JSON object.
+
