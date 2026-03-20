@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
+from sklearn.ensemble import GradientBoostingClassifier  # type: ignore[import-untyped]
+from sklearn.linear_model import LogisticRegression  # type: ignore[import-untyped]
+from sklearn.metrics import (  # type: ignore[import-untyped]
+    accuracy_score,
+    brier_score_loss,
+    log_loss,
+)
+from sklearn.pipeline import make_pipeline  # type: ignore[import-untyped]
+from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
 
 from app.schemas import BTCCandle, FeatureVector, KalshiMarket, MarketSnapshot
 from app.services.features import FeatureBuilder
+from app.services.storage import DuckDBStorage
 
 DEFAULT_DATASET_PATH = Path("data/training_dataset.csv")
+DEFAULT_MIN_TRAINING_ROWS = 10
 DATASET_TIMESTAMP_COLUMNS = (
     "prediction_timestamp",
     "expiry_time",
@@ -65,6 +77,34 @@ class TrainingDatasetArtifact:
     path: Path
     row_count: int
     feature_schema_version: str
+
+
+@dataclass(slots=True)
+class LoadedModelArtifact:
+    """Loaded model artifact used for offline inference."""
+
+    path: Path
+    model_name: str
+    model: Any
+    feature_columns: tuple[str, ...]
+    feature_schema_version: str
+    created_at: datetime
+    metrics: dict[str, dict[str, float]]
+    training_window_start: datetime
+    training_window_end: datetime
+
+
+@dataclass(slots=True)
+class TrainingRunResult:
+    """Summary of a completed training run."""
+
+    artifact_path: Path
+    dataset_rows: int
+    model_name: str
+    feature_schema_version: str
+    metrics: dict[str, dict[str, float]]
+    training_window_start: datetime
+    training_window_end: datetime
 
 
 class TrainingDatasetBuilder:
@@ -278,3 +318,195 @@ class TrainingDatasetBuilder:
             no_bid=round(no_bid, 4),
             no_ask=round(no_ask, 4),
         )
+
+
+class ModelTrainer:
+    """Train, save, and load local sklearn model artifacts."""
+
+    def __init__(self, storage: DuckDBStorage | None = None) -> None:
+        self.storage = storage
+
+    def train(
+        self,
+        dataset: pd.DataFrame,
+        *,
+        artifact_path: str | Path,
+        min_rows: int = DEFAULT_MIN_TRAINING_ROWS,
+    ) -> TrainingRunResult:
+        if len(dataset) < min_rows:
+            raise ValueError(f"At least {min_rows} dataset rows are required to train a model.")
+
+        ordered = dataset.sort_values("prediction_timestamp").reset_index(drop=True)
+        labels = ordered["label"].astype(int)
+        if labels.nunique() < 2:
+            raise ValueError("Training dataset must include both ABOVE and BELOW labels.")
+
+        validation_size = max(int(len(ordered) * 0.2), 1)
+        split_index = len(ordered) - validation_size
+        if split_index <= 0:
+            raise ValueError("Training dataset is too small to create a validation split.")
+
+        train_dataset = ordered.iloc[:split_index]
+        validation_dataset = ordered.iloc[split_index:]
+        if train_dataset["label"].nunique() < 2:
+            train_dataset = ordered
+            validation_dataset = ordered
+
+        x_train = self._feature_frame(train_dataset)
+        y_train = train_dataset["label"].astype(int)
+        x_validation = self._feature_frame(validation_dataset)
+        y_validation = validation_dataset["label"].astype(int)
+
+        models = {
+            "logistic_regression": make_pipeline(
+                StandardScaler(),
+                LogisticRegression(max_iter=1_000, random_state=42),
+            ),
+            "gradient_boosting": GradientBoostingClassifier(random_state=42),
+        }
+        metrics: dict[str, dict[str, float]] = {}
+        fitted_models: dict[str, Any] = {}
+
+        for model_name, model in models.items():
+            model.fit(x_train, y_train)
+            probabilities = model.predict_proba(x_validation)[:, 1]
+            metrics[model_name] = self._metrics(y_validation, probabilities)
+            fitted_models[model_name] = model
+
+        selected_model_name = min(
+            metrics,
+            key=lambda name: (
+                metrics[name]["log_loss"],
+                metrics[name]["brier_score"],
+                -metrics[name]["accuracy"],
+                0 if name == "logistic_regression" else 1,
+            ),
+        )
+        created_at = datetime.now(UTC)
+        feature_schema_version = str(ordered["feature_schema_version"].iloc[0])
+        training_window_start = self._as_datetime(ordered["prediction_timestamp"].iloc[0])
+        training_window_end = self._as_datetime(ordered["prediction_timestamp"].iloc[-1])
+        destination = Path(artifact_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        artifact_payload = {
+            "model_name": selected_model_name,
+            "feature_columns": list(FEATURE_COLUMNS),
+            "feature_schema_version": feature_schema_version,
+            "created_at": created_at.isoformat(),
+            "training_window_start": training_window_start.isoformat(),
+            "training_window_end": training_window_end.isoformat(),
+            "metrics": metrics,
+            "model": fitted_models[selected_model_name],
+        }
+        with destination.open("wb") as artifact_file:
+            pickle.dump(artifact_payload, artifact_file)
+
+        if self.storage is not None:
+            self.storage.insert_model_metadata(
+                metadata_id=f"{selected_model_name}:{created_at.isoformat()}",
+                model_name=selected_model_name,
+                feature_schema_version=feature_schema_version,
+                created_at=created_at,
+                artifact_path=str(destination),
+                training_window_start=training_window_start,
+                training_window_end=training_window_end,
+                metrics=metrics,
+            )
+
+        return TrainingRunResult(
+            artifact_path=destination,
+            dataset_rows=int(len(ordered)),
+            model_name=selected_model_name,
+            feature_schema_version=feature_schema_version,
+            metrics=metrics,
+            training_window_start=training_window_start,
+            training_window_end=training_window_end,
+        )
+
+    @staticmethod
+    def load_artifact(path: str | Path) -> LoadedModelArtifact:
+        source = Path(path)
+        with source.open("rb") as artifact_file:
+            payload = pickle.load(artifact_file)
+
+        metrics_payload = payload["metrics"]
+        if not isinstance(metrics_payload, dict):
+            raise ValueError("Model artifact metrics payload was malformed.")
+
+        return LoadedModelArtifact(
+            path=source,
+            model_name=str(payload["model_name"]),
+            model=payload["model"],
+            feature_columns=tuple(payload["feature_columns"]),
+            feature_schema_version=str(payload["feature_schema_version"]),
+            created_at=datetime.fromisoformat(str(payload["created_at"])).astimezone(UTC),
+            metrics={
+                str(name): {
+                    "accuracy": float(values["accuracy"]),
+                    "log_loss": float(values["log_loss"]),
+                    "brier_score": float(values["brier_score"]),
+                }
+                for name, values in metrics_payload.items()
+            },
+            training_window_start=datetime.fromisoformat(
+                str(payload["training_window_start"])
+            ).astimezone(UTC),
+            training_window_end=datetime.fromisoformat(
+                str(payload["training_window_end"])
+            ).astimezone(UTC),
+        )
+
+    def predict_dataset_probabilities(
+        self,
+        artifact: LoadedModelArtifact,
+        dataset: pd.DataFrame,
+    ) -> list[float]:
+        feature_frame = self._feature_frame(dataset, feature_columns=artifact.feature_columns)
+        probabilities = artifact.model.predict_proba(feature_frame)[:, 1]
+        return [float(probability) for probability in probabilities]
+
+    def predict_feature_probability(
+        self,
+        artifact: LoadedModelArtifact,
+        features: FeatureVector,
+    ) -> float:
+        row = pd.DataFrame(
+            [
+                {
+                    column: getattr(features, column)
+                    for column in artifact.feature_columns
+                }
+            ]
+        )
+        return self.predict_dataset_probabilities(artifact, row)[0]
+
+    @staticmethod
+    def _metrics(labels: pd.Series, probabilities: Any) -> dict[str, float]:
+        clipped = [min(max(float(probability), 1e-6), 1 - 1e-6) for probability in probabilities]
+        predictions = [1 if probability >= 0.5 else 0 for probability in clipped]
+        return {
+            "accuracy": float(accuracy_score(labels, predictions)),
+            "log_loss": float(log_loss(labels, clipped, labels=[0, 1])),
+            "brier_score": float(brier_score_loss(labels, clipped)),
+        }
+
+    @staticmethod
+    def _feature_frame(
+        dataset: pd.DataFrame,
+        *,
+        feature_columns: tuple[str, ...] = FEATURE_COLUMNS,
+    ) -> pd.DataFrame:
+        feature_frame = dataset.loc[:, list(feature_columns)].copy()
+        feature_frame = feature_frame.fillna(0.0)
+        for column in feature_columns:
+            feature_frame[column] = feature_frame[column].astype(float)
+        return feature_frame
+
+    @staticmethod
+    def _as_datetime(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value))
+        return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)

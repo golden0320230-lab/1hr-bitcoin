@@ -2,14 +2,84 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from typer.testing import CliRunner
 
 import app.cli as cli
 from app.cli import app
 from app.config import Settings
-from app.schemas import FeatureVector, KalshiMarket, MarketSnapshot, NewsArticle, PredictionResult
+from app.schemas import (
+    BTCCandle,
+    FeatureVector,
+    KalshiMarket,
+    MarketSnapshot,
+    NewsArticle,
+    PredictionResult,
+)
 
 runner = CliRunner()
+
+
+def _training_candles() -> list[BTCCandle]:
+    start = datetime(2026, 3, 18, 12, 0, tzinfo=UTC)
+    candles: list[BTCCandle] = []
+    closes = [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107,
+        108,
+        109,
+        110,
+        111,
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        118,
+        117,
+        116,
+        115,
+        114,
+        113,
+        112,
+        111,
+        110,
+        109,
+        108,
+        107,
+        106,
+        105,
+        104,
+        103,
+        102,
+        101,
+        100,
+        99,
+    ]
+    for index, close in enumerate(closes):
+        candles.append(
+            BTCCandle(
+                source="coinbase",
+                timeframe="5m",
+                timestamp=start + timedelta(minutes=index * 5),
+                open=close - 0.5,
+                high=close + 0.5,
+                low=close - 1.0,
+                close=close,
+                volume=10 + index,
+            )
+        )
+    return candles
 
 
 def test_root_help_shows_bootstrap_commands() -> None:
@@ -236,3 +306,29 @@ def test_explain_last_outputs_saved_prediction(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "Prediction: ABOVE" in result.output
     assert "Feature values:" in result.output
+
+
+def test_train_command_builds_model_artifact(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_train.duckdb",
+            MODEL_PATH=tmp_path / "baseline.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(
+        cli.CoinbaseClient,
+        "get_candles_range",
+        lambda self, start_at, end_at, timeframe: _training_candles(),
+    )
+
+    result = runner.invoke(app, ["train", "--days", "30"])
+
+    assert result.exit_code == 0
+    assert "Selected model:" in result.output
+    assert (tmp_path / "baseline.pkl").exists()

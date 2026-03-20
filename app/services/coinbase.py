@@ -18,6 +18,13 @@ _GRANULARITY_MAP: dict[CandleTimeframe, str] = {
     "15m": "FIFTEEN_MINUTE",
     "1h": "ONE_HOUR",
 }
+_TIMEFRAME_MINUTES: dict[CandleTimeframe, int] = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "1h": 60,
+}
+_MAX_CANDLES_PER_REQUEST = 300
 
 
 class CoinbaseServiceError(RuntimeError):
@@ -100,6 +107,48 @@ class CoinbaseClient:
         if store and self.storage is not None:
             self.storage.insert_candles(candles)
 
+        return candles
+
+    def get_candles_range(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime | None = None,
+        product_id: str = "BTC-USD",
+        timeframe: CandleTimeframe = "5m",
+        store: bool = True,
+    ) -> list[BTCCandle]:
+        start_time = start_at.astimezone(UTC)
+        end_time = end_at.astimezone(UTC) if end_at is not None else self._now_provider()
+        if end_time <= start_time:
+            raise ValueError("end_at must be after start_at.")
+
+        chunk_minutes = _TIMEFRAME_MINUTES[timeframe] * _MAX_CANDLES_PER_REQUEST
+        chunk_window = timedelta(minutes=chunk_minutes)
+        collected: dict[tuple[str, CandleTimeframe, datetime], BTCCandle] = {}
+        cursor = start_time
+
+        while cursor < end_time:
+            chunk_end = min(cursor + chunk_window, end_time)
+            lookback_minutes = max(
+                int((chunk_end - cursor).total_seconds() // 60),
+                _TIMEFRAME_MINUTES[timeframe],
+            )
+            chunk = self.get_candles(
+                product_id=product_id,
+                timeframe=timeframe,
+                lookback_minutes=lookback_minutes,
+                end_at=chunk_end,
+                store=False,
+            )
+            for candle in chunk:
+                if start_time <= candle.timestamp <= end_time:
+                    collected[(candle.source, candle.timeframe, candle.timestamp)] = candle
+            cursor = chunk_end
+
+        candles = sorted(collected.values(), key=lambda candle: candle.timestamp)
+        if store and self.storage is not None and candles:
+            self.storage.insert_candles(candles)
         return candles
 
     @retry(

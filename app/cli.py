@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging as stdlib_logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import orjson
@@ -24,6 +25,7 @@ from app.services.kimiclaw import KimiClawClient
 from app.services.news import NewsClient
 from app.services.predictor import Predictor
 from app.services.storage import DuckDBStorage
+from app.services.training import ModelTrainer, TrainingDatasetBuilder
 
 app = typer.Typer(
     name=CLI_NAME,
@@ -379,12 +381,73 @@ def predict(
 
 
 @app.command()
-def train(ctx: typer.Context) -> None:
+def train(
+    ctx: typer.Context,
+    days: int = typer.Option(90, "--days", min=7, help="Historical window for training."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
     """Train or refresh the local baseline model."""
 
     runtime = _get_runtime(ctx)
-    runtime.logger.info("train command will be implemented in a later issue.")
-    console.print("train: Local model training arrives in issue 13.")
+    dataset_path = runtime.settings.db_path.parent / "training_dataset.csv"
+    end_time = datetime.now(UTC)
+    start_time = end_time - timedelta(days=days)
+
+    with CoinbaseClient(
+        storage=runtime.storage,
+        timeout_seconds=runtime.settings.http_timeout_seconds,
+    ) as coinbase_client:
+        try:
+            candles = coinbase_client.get_candles_range(
+                start_at=start_time,
+                end_at=end_time,
+                timeframe="5m",
+            )
+        except CoinbaseServiceError as exc:
+            console.print(f"Unable to fetch training candles: {exc}")
+            console.print(RESEARCH_DISCLAIMER)
+            raise typer.Exit(code=1) from exc
+
+    dataset_builder = TrainingDatasetBuilder(dataset_path=dataset_path, strike_increment=100.0)
+    dataset = dataset_builder.build_dataset(candles, horizon_minutes=60, step_candles=1)
+    saved_dataset = dataset_builder.save_dataset(dataset)
+
+    try:
+        result = ModelTrainer(runtime.storage).train(
+            dataset,
+            artifact_path=runtime.settings.model_path,
+        )
+    except ValueError as exc:
+        console.print(f"Unable to train model: {exc}")
+        console.print(RESEARCH_DISCLAIMER)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        _json_echo(
+            {
+                "model_name": result.model_name,
+                "artifact_path": str(result.artifact_path),
+                "dataset_path": str(saved_dataset.path),
+                "dataset_rows": result.dataset_rows,
+                "feature_schema_version": result.feature_schema_version,
+                "training_window_start": result.training_window_start.isoformat(),
+                "training_window_end": result.training_window_end.isoformat(),
+                "metrics": result.metrics,
+                "disclaimer": RESEARCH_DISCLAIMER,
+            }
+        )
+        return
+
+    console.print(f"Training rows: {result.dataset_rows}")
+    console.print(f"Dataset saved: {saved_dataset.path}")
+    console.print(f"Selected model: {result.model_name}")
+    console.print(f"Artifact saved: {result.artifact_path}")
+    console.print(
+        "Validation metrics: "
+        f"accuracy {result.metrics[result.model_name]['accuracy']:.2%}, "
+        f"log loss {result.metrics[result.model_name]['log_loss']:.4f}, "
+        f"Brier {result.metrics[result.model_name]['brier_score']:.4f}"
+    )
     console.print(RESEARCH_DISCLAIMER)
 
 
