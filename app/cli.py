@@ -17,6 +17,7 @@ from app import __version__
 from app.config import Settings, get_settings
 from app.constants import APP_NAME, CLI_NAME, RESEARCH_DISCLAIMER
 from app.logging import configure_logging, get_logger
+from app.services.backtest import BacktestService
 from app.services.coinbase import CoinbaseClient, CoinbaseServiceError
 from app.services.explain import ExplainService
 from app.services.features import FeatureBuilder
@@ -452,12 +453,66 @@ def train(
 
 
 @app.command()
-def backtest(ctx: typer.Context) -> None:
+def backtest(
+    ctx: typer.Context,
+    days: int = typer.Option(30, "--days", min=7, help="Historical window for evaluation."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
     """Run historical evaluations against archived windows."""
 
     runtime = _get_runtime(ctx)
-    runtime.logger.info("backtest command will be implemented in a later issue.")
-    console.print("backtest: Historical evaluation arrives in issue 14.")
+    end_time = datetime.now(UTC)
+    start_time = end_time - timedelta(days=days)
+
+    with CoinbaseClient(
+        storage=runtime.storage,
+        timeout_seconds=runtime.settings.http_timeout_seconds,
+    ) as coinbase_client:
+        try:
+            candles = coinbase_client.get_candles_range(
+                start_at=start_time,
+                end_at=end_time,
+                timeframe="5m",
+            )
+        except CoinbaseServiceError as exc:
+            console.print(f"Unable to fetch backtest candles: {exc}")
+            console.print(RESEARCH_DISCLAIMER)
+            raise typer.Exit(code=1) from exc
+
+    dataset = TrainingDatasetBuilder(strike_increment=100.0).build_dataset(
+        candles,
+        horizon_minutes=60,
+    )
+
+    try:
+        result = BacktestService(runtime.storage).run(dataset)
+    except ValueError as exc:
+        console.print(f"Unable to run backtest: {exc}")
+        console.print(RESEARCH_DISCLAIMER)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        _json_echo(
+            {
+                "backtest": result.model_dump(mode="json"),
+                "disclaimer": RESEARCH_DISCLAIMER,
+            }
+        )
+        return
+
+    console.print(f"Backtest model: {result.model_name}")
+    console.print(f"Backtest samples: {result.num_samples}")
+    console.print(f"Accuracy: {result.accuracy:.2%}")
+    console.print(f"Log loss: {result.log_loss:.4f}")
+    if result.brier_score is not None:
+        console.print(f"Brier score: {result.brier_score:.4f}")
+    console.print("Baselines:")
+    for baseline in result.baselines:
+        console.print(
+            f"- {baseline.name}: accuracy {baseline.accuracy:.2%}, "
+            f"log loss {baseline.log_loss:.4f}, "
+            f"Brier {baseline.brier_score:.4f}"
+        )
     console.print(RESEARCH_DISCLAIMER)
 
 

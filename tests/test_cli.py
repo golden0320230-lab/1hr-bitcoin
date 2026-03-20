@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from math import sin
 
 from typer.testing import CliRunner
 
@@ -77,6 +78,26 @@ def _training_candles() -> list[BTCCandle]:
                 low=close - 1.0,
                 close=close,
                 volume=10 + index,
+            )
+        )
+    return candles
+
+
+def _backtest_candles() -> list[BTCCandle]:
+    start = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
+    candles: list[BTCCandle] = []
+    for index in range(180):
+        close = 84_500 + int(220 * sin(index / 4)) + ((index % 8) - 4) * 12
+        candles.append(
+            BTCCandle(
+                source="coinbase",
+                timeframe="5m",
+                timestamp=start + timedelta(minutes=index * 5),
+                open=close - 15,
+                high=close + 20,
+                low=close - 20,
+                close=close,
+                volume=25 + index,
             )
         )
     return candles
@@ -332,3 +353,29 @@ def test_train_command_builds_model_artifact(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert "Selected model:" in result.output
     assert (tmp_path / "baseline.pkl").exists()
+
+
+def test_backtest_command_outputs_baseline_summary(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_backtest.duckdb",
+            MODEL_PATH=tmp_path / "baseline.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(
+        cli.CoinbaseClient,
+        "get_candles_range",
+        lambda self, start_at, end_at, timeframe: _backtest_candles(),
+    )
+
+    result = runner.invoke(app, ["backtest", "--days", "30"])
+
+    assert result.exit_code == 0
+    assert "Backtest model:" in result.output
+    assert "Baselines:" in result.output
