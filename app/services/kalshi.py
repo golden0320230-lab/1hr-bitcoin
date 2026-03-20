@@ -11,11 +11,16 @@ import httpx
 
 from app.schemas import KalshiMarket, MarketDirection, MarketSnapshot, MarketStatus
 from app.services.storage import DuckDBStorage
+from app.utils.retries import retry_operation
 
 _THRESHOLD_PATTERN = re.compile(
     r"\$?(?P<threshold>[\d,]+(?:\.\d+)?)\s+or\s+(?P<direction>above|below)",
     re.IGNORECASE,
 )
+
+
+class KalshiServiceError(RuntimeError):
+    """Raised when Kalshi public market discovery cannot complete."""
 
 
 class KalshiClient:
@@ -145,9 +150,7 @@ class KalshiClient:
             if cursor:
                 params["cursor"] = cursor
 
-            response = self._client.get("/markets", params=params)
-            response.raise_for_status()
-            data = cast(dict[str, Any], response.json())
+            data = self._request_json("/markets", params=params)
             page_items = cast(list[dict[str, Any]], data.get("markets", []))
             payloads.extend(page_items)
 
@@ -157,6 +160,24 @@ class KalshiClient:
                 break
 
         return payloads
+
+    @retry_operation(httpx.HTTPError, KalshiServiceError)
+    def _request_json(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            response = self._client.get(path, params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise KalshiServiceError(f"Kalshi request failed for {path}.") from exc
+
+        try:
+            return cast(dict[str, Any], response.json())
+        except ValueError as exc:
+            raise KalshiServiceError(f"Kalshi response for {path} was not valid JSON.") from exc
 
     def _is_live_btc_hourly_market(self, payload: dict[str, Any]) -> bool:
         ticker = self._as_text(payload.get("ticker")).upper()

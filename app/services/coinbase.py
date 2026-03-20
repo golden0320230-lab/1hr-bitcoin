@@ -7,10 +7,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.schemas import BTCCandle, CandleTimeframe
 from app.services.storage import DuckDBStorage
+from app.utils.retries import retry_operation
 
 _GRANULARITY_MAP: dict[CandleTimeframe, str] = {
     "1m": "ONE_MINUTE",
@@ -151,12 +151,7 @@ class CoinbaseClient:
             self.storage.insert_candles(candles)
         return candles
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=4),
-        retry=retry_if_exception_type((httpx.HTTPError, CoinbaseServiceError)),
-    )
+    @retry_operation(httpx.HTTPError, CoinbaseServiceError)
     def _request_json(
         self,
         path: str,

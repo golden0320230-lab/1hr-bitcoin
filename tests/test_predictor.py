@@ -138,3 +138,23 @@ def test_predictor_works_without_news_scores() -> None:
     assert result.warnings
     assert result.degraded is True
     assert result.probability >= 0.0
+
+
+def test_predictor_accepts_price_model_override() -> None:
+    predictor = Predictor(now_provider=lambda: datetime(2026, 3, 19, 19, 30, tzinfo=UTC))
+
+    result = predictor.predict(
+        market=_market(),
+        snapshot=_snapshot(),
+        features=_feature_vector(
+            distance_to_strike=-50,
+            distance_to_strike_pct=-0.0006,
+            implied_probability=0.48,
+            news_impact=0.0,
+            high_confidence_article_count=0,
+        ),
+        price_model_probability=0.85,
+    )
+
+    assert result.label == "ABOVE"
+    assert result.probability > 0.5

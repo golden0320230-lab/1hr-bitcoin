@@ -103,6 +103,26 @@ def _backtest_candles() -> list[BTCCandle]:
     return candles
 
 
+def _predict_candles() -> list[BTCCandle]:
+    start = datetime(2026, 3, 19, 18, 0, tzinfo=UTC)
+    candles: list[BTCCandle] = []
+    for index in range(90):
+        close = 84_420 + (index * 3)
+        candles.append(
+            BTCCandle(
+                source="coinbase",
+                timeframe="1m",
+                timestamp=start + timedelta(minutes=index),
+                open=close - 5,
+                high=close + 8,
+                low=close - 8,
+                close=close,
+                volume=15 + index,
+            )
+        )
+    return candles
+
+
 def test_root_help_shows_bootstrap_commands() -> None:
     result = runner.invoke(app, ["--help"])
 
@@ -228,7 +248,7 @@ def test_predict_json_outputs_structured_payload(monkeypatch) -> None:
     monkeypatch.setattr(
         cli.CoinbaseClient,
         "get_candles",
-        lambda self, lookback_minutes, timeframe: [],
+        lambda self, lookback_minutes, timeframe: _predict_candles(),
     )
     monkeypatch.setattr(
         cli.NewsClient,
@@ -243,7 +263,7 @@ def test_predict_json_outputs_structured_payload(monkeypatch) -> None:
     monkeypatch.setattr(
         cli.Predictor,
         "predict",
-        lambda self, market, snapshot, features: prediction,
+        lambda self, market, snapshot, features, price_model_probability=None: prediction,
     )
 
     result = runner.invoke(app, ["predict", "--json"])
@@ -379,3 +399,110 @@ def test_backtest_command_outputs_baseline_summary(monkeypatch, tmp_path) -> Non
     assert result.exit_code == 0
     assert "Backtest model:" in result.output
     assert "Baselines:" in result.output
+
+
+def test_predict_json_warns_when_model_artifact_is_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_predict_missing_model.duckdb",
+            MODEL_PATH=tmp_path / "missing.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+
+    market = KalshiMarket(
+        ticker="BTCD-26MAR191600-T84500",
+        title="Bitcoin price at Mar 19, 2026 at 4pm EDT?",
+        direction="ABOVE",
+        threshold=84_500,
+        expires_at="2026-03-19T20:00:00Z",
+    )
+    snapshot = MarketSnapshot(
+        ticker=market.ticker,
+        captured_at="2026-03-19T19:30:00Z",
+        yes_price=0.51,
+        no_price=0.49,
+        yes_bid=0.5,
+        yes_ask=0.52,
+        no_bid=0.48,
+        no_ask=0.5,
+    )
+
+    monkeypatch.setattr(
+        cli.KalshiClient,
+        "get_live_btc_hourly_market",
+        lambda self: (market, snapshot),
+    )
+    monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: 84_700.0)
+    monkeypatch.setattr(
+        cli.CoinbaseClient,
+        "get_candles",
+        lambda self, lookback_minutes, timeframe: _predict_candles(),
+    )
+
+    result = runner.invoke(app, ["predict", "--json", "--no-news"])
+
+    assert result.exit_code == 0
+    assert "Model artifact missing; using heuristic price model." in result.output
+
+
+def test_predict_uses_cached_candles_when_coinbase_fetch_fails(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "test_cli_predict_cached.duckdb"
+    storage = cli.DuckDBStorage(db_path)
+    try:
+        storage.insert_candles(_predict_candles())
+    finally:
+        storage.close()
+
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=db_path,
+            MODEL_PATH=tmp_path / "missing.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+
+    market = KalshiMarket(
+        ticker="BTCD-26MAR191600-T84500",
+        title="Bitcoin price at Mar 19, 2026 at 4pm EDT?",
+        direction="ABOVE",
+        threshold=84_500,
+        expires_at="2026-03-19T20:00:00Z",
+    )
+    snapshot = MarketSnapshot(
+        ticker=market.ticker,
+        captured_at="2026-03-19T19:30:00Z",
+        yes_price=0.51,
+        no_price=0.49,
+        yes_bid=0.5,
+        yes_ask=0.52,
+        no_bid=0.48,
+        no_ask=0.5,
+    )
+
+    def _raise_coinbase_error(*args, **kwargs):
+        raise cli.CoinbaseServiceError("boom")
+
+    monkeypatch.setattr(
+        cli.KalshiClient,
+        "get_live_btc_hourly_market",
+        lambda self: (market, snapshot),
+    )
+    monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", _raise_coinbase_error)
+    monkeypatch.setattr(cli.CoinbaseClient, "get_candles", _raise_coinbase_error)
+
+    result = runner.invoke(app, ["predict", "--json", "--no-news"])
+
+    assert result.exit_code == 0
+    assert "Using cached BTC candles for feature generation." in result.output
+    assert "\"prediction\"" in result.output

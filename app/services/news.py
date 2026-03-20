@@ -14,6 +14,7 @@ from pydantic import HttpUrl, TypeAdapter
 
 from app.schemas import NewsArticle
 from app.services.storage import DuckDBStorage
+from app.utils.retries import retry_operation
 from app.utils.text import fingerprint_article, sanitize_text
 
 GOOGLE_NEWS_BASE_URL = "https://news.google.com/rss/search"
@@ -93,13 +94,12 @@ class NewsClient:
         lookback_hours: int = 24,
         terms: Iterable[str] = DEFAULT_NEWS_TERMS,
     ) -> list[NewsArticle]:
-        response = self._client.get(
+        response_text = self._request_text(
             self.build_google_news_rss_url(terms=terms, lookback_hours=lookback_hours)
         )
-        response.raise_for_status()
 
         parse_feed = cast(Any, feedparser.parse)
-        parsed = parse_feed(response.text)
+        parsed = parse_feed(response_text)
         entries = cast(list[dict[str, Any]], parsed.entries)
 
         articles: list[NewsArticle] = []
@@ -146,10 +146,7 @@ class NewsClient:
             "maxrecords": str(limit),
             "format": "json",
         }
-        response = self._client.get(GDELT_DOC_API_URL, params=params)
-        response.raise_for_status()
-
-        payload = cast(dict[str, Any], response.json())
+        payload = self._request_json(GDELT_DOC_API_URL, params=params)
         items = payload.get("articles")
         if not isinstance(items, list):
             return []
@@ -225,6 +222,33 @@ class NewsClient:
             filtered.append(article)
 
         return filtered
+
+    @retry_operation(httpx.HTTPError, NewsServiceError)
+    def _request_text(self, url: str) -> str:
+        try:
+            response = self._client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise NewsServiceError(f"News request failed for {url}.") from exc
+        return response.text
+
+    @retry_operation(httpx.HTTPError, NewsServiceError)
+    def _request_json(
+        self,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            response = self._client.get(url, params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise NewsServiceError(f"News request failed for {url}.") from exc
+
+        try:
+            return cast(dict[str, Any], response.json())
+        except ValueError as exc:
+            raise NewsServiceError(f"News response for {url} was not valid JSON.") from exc
 
     @staticmethod
     def _extract_feed_source(entry: dict[str, Any]) -> str:

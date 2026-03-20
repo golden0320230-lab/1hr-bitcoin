@@ -9,10 +9,10 @@ from typing import Any, cast
 
 import httpx
 import orjson
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.schemas import ArticleSentimentScore, NewsArticle
 from app.services.storage import DuckDBStorage
+from app.utils.retries import retry_operation
 from app.utils.text import sanitize_text, truncate_text
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "news_impact_prompt.txt"
@@ -115,12 +115,7 @@ class KimiClawClient:
         )
         return payload.strip()
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=4),
-        retry=retry_if_exception_type((httpx.HTTPError, KimiClawServiceError)),
-    )
+    @retry_operation(httpx.HTTPError, KimiClawServiceError)
     def _request_score(self, article: NewsArticle) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",

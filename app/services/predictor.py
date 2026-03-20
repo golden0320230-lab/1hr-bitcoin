@@ -42,9 +42,14 @@ class Predictor:
         market: KalshiMarket,
         snapshot: MarketSnapshot,
         features: FeatureVector,
+        price_model_probability: float | None = None,
     ) -> PredictionResult:
         market_prior = features.market_implied_probability
-        price_probability = self._price_model_probability(features)
+        price_probability = (
+            price_model_probability
+            if price_model_probability is not None
+            else self._price_model_probability(features)
+        )
         news_probability = 0.5 + (features.news_weighted_impact / 2)
 
         probability = (

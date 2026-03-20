@@ -433,6 +433,65 @@ class DuckDBStorage:
             for row in rows
         ]
 
+    def list_recent_candles(
+        self,
+        *,
+        source: str | None = None,
+        timeframe: CandleTimeframe | None = None,
+        limit: int = 500,
+    ) -> list[BTCCandle]:
+        filters: list[str] = []
+        params: list[Any] = []
+
+        if source is not None:
+            filters.append("source = ?")
+            params.append(source)
+
+        if timeframe is not None:
+            filters.append("timeframe = ?")
+            params.append(timeframe)
+
+        where_clause = ""
+        if filters:
+            where_clause = f"WHERE {' AND '.join(filters)}"
+
+        query = f"""
+            SELECT
+                source,
+                product_id,
+                timeframe,
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                raw_payload
+            FROM btc_candles
+            {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        rows = self.connection.execute(query, params).fetchall()
+        candles = [
+            BTCCandle(
+                source=row[0],
+                product_id=row[1],
+                timeframe=row[2],
+                timestamp=row[3],
+                open=row[4],
+                high=row[5],
+                low=row[6],
+                close=row[7],
+                volume=row[8],
+                raw_payload=_json_loads(row[9]),
+            )
+            for row in rows
+        ]
+        return list(reversed(candles))
+
     def insert_articles(self, articles: Iterable[NewsArticle]) -> int:
         before_count = self.count_rows("news_articles")
         rows = [

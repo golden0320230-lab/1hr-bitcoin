@@ -17,13 +17,14 @@ from app import __version__
 from app.config import Settings, get_settings
 from app.constants import APP_NAME, CLI_NAME, RESEARCH_DISCLAIMER
 from app.logging import configure_logging, get_logger
+from app.schemas import ArticleSentimentScore, BTCCandle, FeatureVector, NewsArticle
 from app.services.backtest import BacktestService
 from app.services.coinbase import CoinbaseClient, CoinbaseServiceError
 from app.services.explain import ExplainService
 from app.services.features import FeatureBuilder
-from app.services.kalshi import KalshiClient
-from app.services.kimiclaw import KimiClawClient
-from app.services.news import NewsClient
+from app.services.kalshi import KalshiClient, KalshiServiceError
+from app.services.kimiclaw import KimiClawClient, KimiClawServiceError
+from app.services.news import NewsClient, NewsServiceError
 from app.services.predictor import Predictor
 from app.services.storage import DuckDBStorage
 from app.services.training import ModelTrainer, TrainingDatasetBuilder
@@ -120,6 +121,66 @@ def _market_payload(
     )
 
 
+def _kimiclaw_fallback_used(scores: list[ArticleSentimentScore]) -> bool:
+    return any(score.raw_response == {"fallback": True} for score in scores)
+
+
+def _score_articles_with_warnings(
+    runtime: Runtime,
+    articles: list[NewsArticle],
+) -> tuple[list[ArticleSentimentScore], list[str]]:
+    if not articles:
+        return [], ["No recent BTC-related articles found; using neutral news contribution."]
+
+    if not _is_kimiclaw_configured(runtime.settings):
+        return [], ["KimiClaw is not configured; using neutral news contribution."]
+
+    with KimiClawClient(
+        base_url=runtime.settings.kimiclaw_base_url,
+        api_key=runtime.settings.kimiclaw_api_key.get_secret_value(),
+        model_name=runtime.settings.kimiclaw_model,
+        storage=runtime.storage,
+        timeout_seconds=runtime.settings.http_timeout_seconds,
+    ) as client:
+        try:
+            scores = client.score_articles(articles)
+        except KimiClawServiceError:
+            return [], ["KimiClaw unavailable; using neutral news contribution."]
+
+    warnings: list[str] = []
+    if _kimiclaw_fallback_used(scores):
+        warnings.append("KimiClaw unavailable or invalid output; using neutral news contribution.")
+    return scores, warnings
+
+
+def _load_cached_candles(storage: DuckDBStorage) -> list[BTCCandle]:
+    for timeframe in ("1m", "5m", "15m"):
+        candles = storage.list_recent_candles(source="coinbase", timeframe=timeframe, limit=90)
+        if candles:
+            return candles
+    return []
+
+
+def _load_price_model_probability(
+    runtime: Runtime,
+    features: FeatureVector,
+) -> tuple[float | None, list[str]]:
+    warnings: list[str] = []
+    model_path = runtime.settings.model_path
+    if not model_path.exists():
+        warnings.append("Model artifact missing; using heuristic price model.")
+        return None, warnings
+
+    try:
+        artifact = ModelTrainer.load_artifact(model_path)
+        probability = ModelTrainer().predict_feature_probability(artifact, features)
+    except (OSError, ValueError, KeyError, TypeError):
+        warnings.append("Model artifact could not be loaded; using heuristic price model.")
+        return None, warnings
+
+    return probability, warnings
+
+
 @app.callback()
 def root(
     ctx: typer.Context,
@@ -152,11 +213,24 @@ def market(
     """Show the live Kalshi BTC hourly market."""
 
     runtime = _get_runtime(ctx)
-    with KalshiClient(
-        storage=runtime.storage,
-        timeout_seconds=runtime.settings.http_timeout_seconds,
-    ) as client:
-        discovered = client.get_live_btc_hourly_market()
+    try:
+        with KalshiClient(
+            storage=runtime.storage,
+            timeout_seconds=runtime.settings.http_timeout_seconds,
+        ) as client:
+            discovered = client.get_live_btc_hourly_market()
+    except KalshiServiceError:
+        payload = {
+            "market": None,
+            "warnings": ["Kalshi market discovery failed."],
+            "disclaimer": RESEARCH_DISCLAIMER,
+        }
+        if json_output:
+            _json_echo(payload)
+        else:
+            console.print("Kalshi market discovery failed.")
+            console.print(RESEARCH_DISCLAIMER)
+        return
 
     if discovered is None:
         no_market_payload: dict[str, object] = {
@@ -201,24 +275,20 @@ def news(
     effective_limit = limit or runtime.settings.news_article_limit
     warnings: list[str] = []
 
-    with NewsClient(
-        storage=runtime.storage,
-        timeout_seconds=runtime.settings.http_timeout_seconds,
-    ) as client:
-        articles = client.fetch_recent_articles(limit=effective_limit, lookback_hours=24)
-
-    scores = []
-    if score and articles and _is_kimiclaw_configured(runtime.settings):
-        with KimiClawClient(
-            base_url=runtime.settings.kimiclaw_base_url,
-            api_key=runtime.settings.kimiclaw_api_key.get_secret_value(),
-            model_name=runtime.settings.kimiclaw_model,
+    try:
+        with NewsClient(
             storage=runtime.storage,
             timeout_seconds=runtime.settings.http_timeout_seconds,
         ) as client:
-            scores = client.score_articles(articles)
-    elif score and articles:
-        warnings.append("KimiClaw is not configured; returning unscored articles.")
+            articles = client.fetch_recent_articles(limit=effective_limit, lookback_hours=24)
+    except NewsServiceError:
+        articles = []
+        warnings.append("News fetch failed; returning no recent articles.")
+
+    scores: list[ArticleSentimentScore] = []
+    if score and articles:
+        scores, score_warnings = _score_articles_with_warnings(runtime, articles)
+        warnings.extend(score_warnings)
 
     if json_output:
         _json_echo(
@@ -266,11 +336,24 @@ def predict(
     runtime = _get_runtime(ctx)
     warnings: list[str] = []
 
-    with KalshiClient(
-        storage=runtime.storage,
-        timeout_seconds=runtime.settings.http_timeout_seconds,
-    ) as kalshi_client:
-        discovered = kalshi_client.get_live_btc_hourly_market()
+    try:
+        with KalshiClient(
+            storage=runtime.storage,
+            timeout_seconds=runtime.settings.http_timeout_seconds,
+        ) as kalshi_client:
+            discovered = kalshi_client.get_live_btc_hourly_market()
+    except KalshiServiceError:
+        payload = {
+            "prediction": None,
+            "warnings": ["Kalshi market discovery failed."],
+            "disclaimer": RESEARCH_DISCLAIMER,
+        }
+        if json_output:
+            _json_echo(payload)
+        else:
+            console.print("Kalshi market discovery failed.")
+            console.print(RESEARCH_DISCLAIMER)
+        return
 
     if discovered is None:
         payload = {
@@ -287,39 +370,68 @@ def predict(
 
     market_model, snapshot = discovered
 
+    spot_price: float | None = None
+    candles: list[BTCCandle] = []
     with CoinbaseClient(
         storage=runtime.storage,
         timeout_seconds=runtime.settings.http_timeout_seconds,
     ) as coinbase_client:
         try:
             spot_price = coinbase_client.get_spot_price()
+        except CoinbaseServiceError:
+            warnings.append(
+                "BTC spot fetch failed; using latest available candle close if possible."
+            )
+
+        try:
             candles = coinbase_client.get_candles(lookback_minutes=90, timeframe="1m")
-        except CoinbaseServiceError as exc:
-            raise typer.Exit(code=1) from exc
+        except CoinbaseServiceError:
+            warnings.append("BTC candle fetch failed; using cached BTC candles if available.")
+
+    if not candles:
+        candles = _load_cached_candles(runtime.storage)
+        if candles:
+            warnings.append("Using cached BTC candles for feature generation.")
+
+    if spot_price is None and candles:
+        spot_price = candles[-1].close
+        warnings.append("Using latest cached candle close as BTC spot price.")
+
+    if spot_price is None or not candles:
+        error_warnings = warnings + ["BTC fetch failed and no cached data was available."]
+        payload = {
+            "prediction": None,
+            "warnings": error_warnings,
+            "disclaimer": RESEARCH_DISCLAIMER,
+        }
+        if json_output:
+            _json_echo(payload)
+        else:
+            for warning in error_warnings:
+                console.print(warning)
+            console.print(RESEARCH_DISCLAIMER)
+        return
 
     articles = []
-    scores = []
+    scores: list[ArticleSentimentScore] = []
     if not no_news:
-        with NewsClient(
-            storage=runtime.storage,
-            timeout_seconds=runtime.settings.http_timeout_seconds,
-        ) as news_client:
-            articles = news_client.fetch_recent_articles(
-                limit=news_limit or runtime.settings.news_article_limit,
-                lookback_hours=24,
-            )
-        if articles and _is_kimiclaw_configured(runtime.settings):
-            with KimiClawClient(
-                base_url=runtime.settings.kimiclaw_base_url,
-                api_key=runtime.settings.kimiclaw_api_key.get_secret_value(),
-                model_name=runtime.settings.kimiclaw_model,
+        try:
+            with NewsClient(
                 storage=runtime.storage,
                 timeout_seconds=runtime.settings.http_timeout_seconds,
-            ) as kimi_client:
-                scores = kimi_client.score_articles(articles)
-        elif articles:
-            warnings.append("KimiClaw is not configured; using neutral news contribution.")
-        else:
+            ) as news_client:
+                articles = news_client.fetch_recent_articles(
+                    limit=news_limit or runtime.settings.news_article_limit,
+                    lookback_hours=24,
+                )
+        except NewsServiceError:
+            warnings.append("News fetch failed; using neutral news contribution.")
+            articles = []
+
+        if articles:
+            scores, score_warnings = _score_articles_with_warnings(runtime, articles)
+            warnings.extend(score_warnings)
+        elif "News fetch failed; using neutral news contribution." not in warnings:
             warnings.append(
                 "No recent BTC-related articles found; using neutral news contribution."
             )
@@ -334,7 +446,14 @@ def predict(
         news_scores=scores,
         generated_at=snapshot.captured_at,
     )
-    result = Predictor().predict(market=market_model, snapshot=snapshot, features=features)
+    price_model_probability, model_warnings = _load_price_model_probability(runtime, features)
+    warnings.extend(model_warnings)
+    result = Predictor().predict(
+        market=market_model,
+        snapshot=snapshot,
+        features=features,
+        price_model_probability=price_model_probability,
+    )
 
     if warnings:
         result = result.model_copy(
