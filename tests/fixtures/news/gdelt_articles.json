@@ -1,0 +1,11 @@
+{
+  "articles": [
+    {
+      "title": "BTC options positioning firms up",
+      "url": "https://gdelt.example.com/options",
+      "domain": "gdelt.example.com",
+      "seendate": "20260319T183500Z",
+      "seendescription": "Options activity increased into the final hour."
+    }
+  ]
+}

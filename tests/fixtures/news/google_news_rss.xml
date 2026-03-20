@@ -1,0 +1,18 @@
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Bitcoin ETF inflows rise again</title>
+      <link>https://example.com/bitcoin-etf</link>
+      <pubDate>Thu, 19 Mar 2026 18:30:00 GMT</pubDate>
+      <description><![CDATA[<p>Fresh ETF inflows may support near-term BTC sentiment.</p>]]></description>
+      <source>Example Wire</source>
+    </item>
+    <item>
+      <title>Bitcoin miners expand operations</title>
+      <link>https://example.com/miners</link>
+      <pubDate>Thu, 19 Mar 2026 18:20:00 GMT</pubDate>
+      <description><![CDATA[<p>Miner expansion remains a secondary story.</p>]]></description>
+      <source>Industry Desk</source>
+    </item>
+  </channel>
+</rss>
