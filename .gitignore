@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environment
+.env
+
+# Local data artifacts
+data/*.duckdb
+data/*.wal
+models/*.pkl
+
+# Editors and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
