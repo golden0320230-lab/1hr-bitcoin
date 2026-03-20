@@ -10,5 +10,3 @@ DEFAULT_MODEL_PATH = Path("models/baseline.pkl")
 DEFAULT_NEWS_ARTICLE_LIMIT = 20
 DEFAULT_HTTP_TIMEOUT_SECONDS = 20.0
 RESEARCH_DISCLAIMER = "Research only. Not financial advice. No trade execution performed."
-PLACEHOLDER_MESSAGE = "This command is scaffolded in issue 1 and will be implemented later."
-

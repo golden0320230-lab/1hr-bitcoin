@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kalshi-btc-cli"
 version = "0.1.0"
-description = "Research-only CLI scaffold for the Kalshi BTC 1-hour predictor."
+description = "Research-only local CLI for the live Kalshi BTC 1-hour predictor."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -45,6 +45,9 @@ packages = ["app"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+filterwarnings = [
+  "ignore:To avoid breaking existing software while fixing issue 310.*:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
@@ -58,4 +61,3 @@ python_version = "3.11"
 packages = ["app"]
 strict = true
 warn_unused_configs = true
-
