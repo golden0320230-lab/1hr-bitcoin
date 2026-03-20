@@ -1,4 +1,4 @@
-"""Kalshi market discovery helpers for BTC hourly markets."""
+"""Kalshi market discovery helpers for BTC 15-minute markets."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ _THRESHOLD_PATTERN = re.compile(
     r"\$?(?P<threshold>[\d,]+(?:\.\d+)?)\s+or\s+(?P<direction>above|below)",
     re.IGNORECASE,
 )
+_TARGET_PRICE_PATTERNS = (
+    re.compile(
+        r"target(?:\s+price)?\s*[:\-]?\s*\$?(?P<threshold>[\d,]+(?:\.\d+)?)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\$?(?P<threshold>[\d,]+(?:\.\d+)?)\s+target", re.IGNORECASE),
+)
+_BTC_15M_SERIES_TICKER = "KXBTC15M"
 
 
 class KalshiServiceError(RuntimeError):
@@ -24,7 +32,7 @@ class KalshiServiceError(RuntimeError):
 
 
 class KalshiClient:
-    """Client for discovering live BTC hourly markets from Kalshi's public API."""
+    """Client for discovering live BTC 15-minute markets from Kalshi's public API."""
 
     def __init__(
         self,
@@ -50,11 +58,9 @@ class KalshiClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def get_live_btc_hourly_market(self) -> tuple[KalshiMarket, MarketSnapshot] | None:
+    def get_live_btc_market(self) -> tuple[KalshiMarket, MarketSnapshot] | None:
         payloads = self._fetch_candidate_payloads()
-        live_payloads = [
-            payload for payload in payloads if self._is_live_btc_hourly_market(payload)
-        ]
+        live_payloads = [payload for payload in payloads if self._is_live_btc_market(payload)]
 
         if not live_payloads:
             return None
@@ -68,6 +74,11 @@ class KalshiClient:
             self.storage.insert_market_snapshot(snapshot)
 
         return market, snapshot
+
+    def get_live_btc_hourly_market(self) -> tuple[KalshiMarket, MarketSnapshot] | None:
+        """Backward-compatible alias for older hourly-oriented call sites."""
+
+        return self.get_live_btc_market()
 
     def parse_market(self, payload: dict[str, Any]) -> KalshiMarket:
         threshold = self._extract_threshold(payload)
@@ -127,16 +138,26 @@ class KalshiClient:
         )
 
     def _fetch_candidate_payloads(self) -> list[dict[str, Any]]:
-        series_payloads = self._fetch_markets(series_ticker="BTCD", limit=200, max_pages=3)
+        series_payloads = self._fetch_markets(
+            series_ticker=_BTC_15M_SERIES_TICKER,
+            status="open",
+            limit=100,
+            max_pages=2,
+        )
         if series_payloads:
             return series_payloads
 
-        return self._fetch_markets(limit=1_000, max_pages=5)
+        return self._fetch_markets(
+            series_ticker=_BTC_15M_SERIES_TICKER,
+            limit=200,
+            max_pages=3,
+        )
 
     def _fetch_markets(
         self,
         *,
         series_ticker: str | None = None,
+        status: str | None = None,
         limit: int,
         max_pages: int,
     ) -> list[dict[str, Any]]:
@@ -147,6 +168,8 @@ class KalshiClient:
             params: dict[str, Any] = {"limit": limit}
             if series_ticker is not None:
                 params["series_ticker"] = series_ticker
+            if status is not None:
+                params["status"] = status
             if cursor:
                 params["cursor"] = cursor
 
@@ -179,7 +202,7 @@ class KalshiClient:
         except ValueError as exc:
             raise KalshiServiceError(f"Kalshi response for {path} was not valid JSON.") from exc
 
-    def _is_live_btc_hourly_market(self, payload: dict[str, Any]) -> bool:
+    def _is_live_btc_market(self, payload: dict[str, Any]) -> bool:
         ticker = self._as_text(payload.get("ticker")).upper()
         event_ticker = self._as_text(payload.get("event_ticker")).upper()
         title = self._as_text(payload.get("title"))
@@ -188,8 +211,11 @@ class KalshiClient:
         if status in {"settled", "closed", "finalized"}:
             return False
 
+        if self._as_text(payload.get("market_type")).lower() != "binary":
+            return False
+
         identifier_text = " ".join([ticker, event_ticker, title]).upper()
-        if "BITCOIN" not in identifier_text and "BTC" not in identifier_text:
+        if _BTC_15M_SERIES_TICKER not in identifier_text and "BTC" not in identifier_text:
             return False
 
         open_time = self._parse_datetime(payload.get("open_time"))
@@ -198,10 +224,11 @@ class KalshiClient:
             return False
 
         duration = close_time - open_time
-        if duration < timedelta(minutes=45) or duration > timedelta(minutes=75):
+        if duration < timedelta(minutes=10) or duration > timedelta(minutes=20):
             return False
 
-        if close_time <= self._now_provider():
+        now = self._now_provider()
+        if open_time > now or close_time <= now:
             return False
 
         try:
@@ -230,23 +257,31 @@ class KalshiClient:
             if numeric_value is not None and numeric_value > 0:
                 return numeric_value
 
-        for text_key in ("yes_sub_title", "no_sub_title", "title"):
+        for text_key in ("yes_sub_title", "no_sub_title", "title", "subtitle"):
             text = self._as_text(payload.get(text_key))
             match = _THRESHOLD_PATTERN.search(text)
             if match is not None:
                 return float(match.group("threshold").replace(",", ""))
+            for pattern in _TARGET_PRICE_PATTERNS:
+                target_match = pattern.search(text)
+                if target_match is not None:
+                    return float(target_match.group("threshold").replace(",", ""))
 
         raise ValueError("Unable to extract market threshold from payload.")
 
     def _extract_direction(self, payload: dict[str, Any]) -> MarketDirection:
         strike_type = self._as_text(payload.get("strike_type")).lower()
-        if strike_type == "greater":
+        if strike_type in {"greater", "greater_or_equal"}:
             return "ABOVE"
-        if strike_type == "less":
+        if strike_type in {"less", "less_or_equal"}:
             return "BELOW"
 
         for text_key in ("yes_sub_title", "no_sub_title", "title"):
             text = self._as_text(payload.get(text_key))
+            if "price up" in text.lower():
+                return "ABOVE"
+            if "price down" in text.lower():
+                return "BELOW"
             match = _THRESHOLD_PATTERN.search(text)
             if match is not None:
                 return "ABOVE" if match.group("direction").lower() == "above" else "BELOW"
@@ -267,7 +302,7 @@ class KalshiClient:
     def _extract_updated_time(self, payload: dict[str, Any]) -> datetime:
         for key in ("updated_time", "created_time", "open_time"):
             parsed = self._parse_datetime(payload.get(key))
-            if parsed is not None:
+            if parsed is not None and parsed.year >= 2000:
                 return parsed
 
         return self._now_provider()
@@ -275,8 +310,12 @@ class KalshiClient:
     @staticmethod
     def _normalize_status(value: Any) -> MarketStatus:
         status = str(value).lower() if value is not None else "unknown"
-        if status in {"open", "closed", "settled"}:
-            return cast(MarketStatus, status)
+        if status in {"open", "active"}:
+            return "open"
+        if status == "closed":
+            return "closed"
+        if status in {"settled", "finalized"}:
+            return "settled"
         return "unknown"
 
     @staticmethod

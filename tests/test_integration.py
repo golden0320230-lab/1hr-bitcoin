@@ -20,7 +20,7 @@ from app.services.news import GDELT_DOC_API_URL, NewsClient
 
 runner = CliRunner()
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-ORIGINAL_KALSHI_GET_LIVE = KalshiClient.get_live_btc_hourly_market
+ORIGINAL_KALSHI_GET_LIVE = KalshiClient.get_live_btc_market
 ORIGINAL_COINBASE_GET_SPOT = CoinbaseClient.get_spot_price
 ORIGINAL_COINBASE_GET_CANDLES = CoinbaseClient.get_candles
 ORIGINAL_NEWS_FETCH = NewsClient.fetch_recent_articles
@@ -57,7 +57,7 @@ def _kalshi_client() -> KalshiClient:
             transport=httpx.MockTransport(handler),
             base_url="https://api.elections.kalshi.com/trade-api/v2",
         ),
-        now_provider=lambda: datetime(2026, 3, 19, 19, 30, tzinfo=UTC),
+        now_provider=lambda: datetime(2026, 3, 19, 19, 37, tzinfo=UTC),
     )
 
 
@@ -168,14 +168,14 @@ def test_market_command_runs_offline_with_kalshi_fixture(monkeypatch, tmp_path: 
     monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: _fixture_market(),
     )
 
     result = runner.invoke(app, ["market", "--json"])
 
     assert result.exit_code == 0
-    assert "\"ticker\": \"BTCD-26MAR191600-T84500\"" in result.output
+    assert "\"ticker\": \"KXBTC15M-26MAR191545-45\"" in result.output
 
 
 def test_news_command_runs_offline_with_news_and_kimiclaw_fixtures(
@@ -206,7 +206,7 @@ def test_predict_command_runs_offline_with_provider_fixtures(monkeypatch, tmp_pa
     monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: _fixture_market(),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: _fixture_spot())
@@ -237,7 +237,7 @@ def test_predict_with_missing_news_still_returns_prediction(monkeypatch, tmp_pat
     monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: _fixture_market(),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: _fixture_spot())
@@ -266,7 +266,7 @@ def test_predict_with_invalid_kimiclaw_output_uses_neutral_fallback(
     monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: _fixture_market(),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: _fixture_spot())

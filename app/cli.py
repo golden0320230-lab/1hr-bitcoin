@@ -31,7 +31,7 @@ from app.services.training import ModelTrainer, TrainingDatasetBuilder
 
 app = typer.Typer(
     name=CLI_NAME,
-    help="Research-only CLI for the Kalshi BTC 1-hour predictor.",
+    help="Research-only CLI for the Kalshi BTC 15-minute predictor.",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,
@@ -219,7 +219,7 @@ def market(
     ctx: typer.Context,
     json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
-    """Show the live Kalshi BTC hourly market."""
+    """Show the live Kalshi BTC 15-minute market."""
 
     runtime = _get_runtime(ctx)
     try:
@@ -227,7 +227,7 @@ def market(
             storage=runtime.storage,
             timeout_seconds=runtime.settings.http_timeout_seconds,
         ) as client:
-            discovered = client.get_live_btc_hourly_market()
+            discovered = client.get_live_btc_market()
     except KalshiServiceError:
         payload = {
             "market": None,
@@ -244,13 +244,13 @@ def market(
     if discovered is None:
         no_market_payload: dict[str, object] = {
             "market": None,
-            "warnings": ["No live BTC hourly Kalshi market found."],
+            "warnings": ["No live BTC 15-minute Kalshi market found."],
             "disclaimer": RESEARCH_DISCLAIMER,
         }
         if json_output:
             _json_echo(no_market_payload)
         else:
-            console.print("No live BTC hourly Kalshi market found.")
+            console.print("No live BTC 15-minute Kalshi market found.")
             console.print(RESEARCH_DISCLAIMER)
         return
 
@@ -297,6 +297,7 @@ def news(
             timeout_seconds=runtime.settings.http_timeout_seconds,
         ) as client:
             articles = client.fetch_recent_articles(limit=effective_limit, lookback_hours=24)
+            warnings.extend(client.last_warnings)
     except NewsServiceError:
         articles = []
         warnings.append("News fetch failed; returning no recent articles.")
@@ -356,7 +357,7 @@ def predict(
             storage=runtime.storage,
             timeout_seconds=runtime.settings.http_timeout_seconds,
         ) as kalshi_client:
-            discovered = kalshi_client.get_live_btc_hourly_market()
+            discovered = kalshi_client.get_live_btc_market()
     except KalshiServiceError:
         payload = {
             "prediction": None,
@@ -373,13 +374,13 @@ def predict(
     if discovered is None:
         payload = {
             "prediction": None,
-            "warnings": ["No live BTC hourly Kalshi market found."],
+            "warnings": ["No live BTC 15-minute Kalshi market found."],
             "disclaimer": RESEARCH_DISCLAIMER,
         }
         if json_output:
             _json_echo(payload)
         else:
-            console.print("No live BTC hourly Kalshi market found.")
+            console.print("No live BTC 15-minute Kalshi market found.")
             console.print(RESEARCH_DISCLAIMER)
         return
 
@@ -439,6 +440,7 @@ def predict(
                     limit=news_limit or runtime.settings.news_article_limit,
                     lookback_hours=24,
                 )
+                warnings.extend(news_client.last_warnings)
         except NewsServiceError:
             warnings.append("News fetch failed; using neutral news contribution.")
             articles = []
@@ -446,7 +448,9 @@ def predict(
         if articles:
             scores, score_warnings = _score_articles_with_warnings(runtime, articles)
             warnings.extend(score_warnings)
-        elif "News fetch failed; using neutral news contribution." not in warnings:
+        elif not any("fetch failed" in warning.lower() for warning in warnings) and not any(
+            "rate-limited" in warning.lower() for warning in warnings
+        ):
             warnings.append(
                 "No recent BTC-related articles found; using neutral news contribution."
             )
@@ -541,8 +545,8 @@ def train(
             console.print(RESEARCH_DISCLAIMER)
             raise typer.Exit(code=1) from exc
 
-    dataset_builder = TrainingDatasetBuilder(dataset_path=dataset_path, strike_increment=100.0)
-    dataset = dataset_builder.build_dataset(candles, horizon_minutes=60, step_candles=1)
+    dataset_builder = TrainingDatasetBuilder(dataset_path=dataset_path, strike_increment=0.01)
+    dataset = dataset_builder.build_dataset(candles, horizon_minutes=15, step_candles=1)
     saved_dataset = dataset_builder.save_dataset(dataset)
 
     try:
@@ -614,9 +618,9 @@ def backtest(
             console.print(RESEARCH_DISCLAIMER)
             raise typer.Exit(code=1) from exc
 
-    dataset = TrainingDatasetBuilder(strike_increment=100.0).build_dataset(
+    dataset = TrainingDatasetBuilder(strike_increment=0.01).build_dataset(
         candles,
-        horizon_minutes=60,
+        horizon_minutes=15,
     )
 
     try:

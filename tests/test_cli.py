@@ -127,7 +127,7 @@ def test_root_help_shows_bootstrap_commands() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "Research-only CLI for the Kalshi BTC 1-hour predictor." in result.output
+    assert "Research-only CLI for the Kalshi BTC 15-minute predictor." in result.output
     assert "market" in result.output
     assert "predict" in result.output
 
@@ -136,7 +136,7 @@ def test_market_help_works() -> None:
     result = runner.invoke(app, ["market", "--help"])
 
     assert result.exit_code == 0
-    assert "Show the live Kalshi BTC hourly market." in result.output
+    assert "Show the live Kalshi BTC 15-minute market." in result.output
 
 
 def test_market_json_includes_warnings_field(monkeypatch) -> None:
@@ -172,7 +172,7 @@ def test_market_json_includes_warnings_field(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: (market, snapshot),
     )
 
@@ -213,6 +213,42 @@ def test_news_command_outputs_articles(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "Bitcoin ETF inflows rise" in result.output
+
+
+def test_news_command_surfaces_partial_source_warning(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH="./data/test_cli_news_warning.duckdb",
+            MODEL_PATH="./models/test_cli_news_warning.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+
+    def _fetch_recent_articles(self, limit, lookback_hours):
+        self.last_warnings = [
+            "GDELT rate-limited the request; continuing without that source."
+        ]
+        return [
+            NewsArticle(
+                title="Bitcoin ETF inflows rise",
+                url="https://example.com/etf",
+                source="Example Wire",
+                published_at="2026-03-19T18:30:00Z",
+                summary="Fresh inflow headline",
+            )
+        ]
+
+    monkeypatch.setattr(cli.NewsClient, "fetch_recent_articles", _fetch_recent_articles)
+
+    result = runner.invoke(app, ["news", "--limit", "1", "--json"])
+
+    assert result.exit_code == 0
+    assert "GDELT rate-limited the request; continuing without that source." in result.output
 
 
 def test_predict_json_outputs_structured_payload(monkeypatch) -> None:
@@ -284,7 +320,7 @@ def test_predict_json_outputs_structured_payload(monkeypatch) -> None:
 
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: (market, snapshot),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: 84_700.0)
@@ -315,6 +351,60 @@ def test_predict_json_outputs_structured_payload(monkeypatch) -> None:
     assert "\"prediction\"" in result.output
     assert "\"label\": \"ABOVE\"" in result.output
     assert "\"warnings\"" in result.output
+
+
+def test_predict_json_includes_partial_news_source_warning(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_predict_news_warning.duckdb",
+            MODEL_PATH=tmp_path / "missing.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+
+    market = KalshiMarket(
+        ticker="BTCD-26MAR191600-T84500",
+        title="Bitcoin price at Mar 19, 2026 at 4pm EDT?",
+        direction="ABOVE",
+        threshold=84_500,
+        expires_at="2026-03-19T20:00:00Z",
+    )
+    snapshot = MarketSnapshot(
+        ticker=market.ticker,
+        captured_at="2026-03-19T19:30:00Z",
+        yes_price=0.51,
+        no_price=0.49,
+        yes_bid=0.5,
+        yes_ask=0.52,
+        no_bid=0.48,
+        no_ask=0.5,
+    )
+
+    def _fetch_recent_articles(self, limit, lookback_hours):
+        self.last_warnings = [
+            "GDELT rate-limited the request; continuing without that source."
+        ]
+        return []
+
+    monkeypatch.setattr(cli.KalshiClient, "get_live_btc_market", lambda self: (market, snapshot))
+    monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: 84_700.0)
+    monkeypatch.setattr(
+        cli.CoinbaseClient,
+        "get_candles",
+        lambda self, lookback_minutes, timeframe: _predict_candles(),
+    )
+    monkeypatch.setattr(cli.NewsClient, "fetch_recent_articles", _fetch_recent_articles)
+
+    result = runner.invoke(app, ["predict", "--json"])
+
+    assert result.exit_code == 0
+    assert "GDELT rate-limited the request; continuing without that source." in result.output
+    assert "\"prediction\"" in result.output
 
 
 def test_explain_last_outputs_saved_prediction(monkeypatch) -> None:
@@ -555,7 +645,7 @@ def test_predict_json_warns_when_model_artifact_is_missing(monkeypatch, tmp_path
 
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: (market, snapshot),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: 84_700.0)
@@ -615,7 +705,7 @@ def test_predict_uses_cached_candles_when_coinbase_fetch_fails(monkeypatch, tmp_
 
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: (market, snapshot),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", _raise_coinbase_error)
@@ -662,7 +752,7 @@ def test_predict_human_output_stays_research_only(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(
         cli.KalshiClient,
-        "get_live_btc_hourly_market",
+        "get_live_btc_market",
         lambda self: (market, snapshot),
     )
     monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: 84_700.0)

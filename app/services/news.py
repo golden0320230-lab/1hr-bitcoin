@@ -39,6 +39,7 @@ class NewsClient:
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self.storage = storage
+        self.last_warnings: list[str] = []
         self._owns_client = http_client is None
         self._client = http_client or httpx.Client(timeout=timeout_seconds)
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
@@ -72,12 +73,29 @@ class NewsClient:
         lookback_hours: int = 24,
         include_gdelt: bool = True,
     ) -> list[NewsArticle]:
-        articles = self.fetch_google_news_rss(limit=limit, lookback_hours=lookback_hours)
+        self.last_warnings = []
+        articles: list[NewsArticle] = []
+        source_failures = 0
+
+        try:
+            articles.extend(self.fetch_google_news_rss(limit=limit, lookback_hours=lookback_hours))
+        except NewsServiceError as exc:
+            source_failures += 1
+            self.last_warnings.append(self._source_warning("Google News RSS", exc))
+
         if include_gdelt:
             gdelt_limit = max(limit, 10)
-            articles.extend(
-                self.fetch_gdelt_articles(limit=gdelt_limit, lookback_hours=lookback_hours)
-            )
+            try:
+                articles.extend(
+                    self.fetch_gdelt_articles(limit=gdelt_limit, lookback_hours=lookback_hours)
+                )
+            except NewsServiceError as exc:
+                source_failures += 1
+                self.last_warnings.append(self._source_warning("GDELT", exc))
+
+        attempted_sources = 2 if include_gdelt else 1
+        if source_failures >= attempted_sources:
+            self.last_warnings.append("All news sources failed; returning no recent articles.")
 
         deduped = self._deduplicate_articles(articles, lookback_hours=lookback_hours)
         limited = deduped[:limit]
@@ -229,7 +247,7 @@ class NewsClient:
             response = self._client.get(url)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise NewsServiceError(f"News request failed for {url}.") from exc
+            raise NewsServiceError(self._request_error_message(url, exc)) from exc
         return response.text
 
     @retry_operation(httpx.HTTPError, NewsServiceError)
@@ -243,12 +261,29 @@ class NewsClient:
             response = self._client.get(url, params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise NewsServiceError(f"News request failed for {url}.") from exc
+            raise NewsServiceError(self._request_error_message(url, exc)) from exc
 
         try:
             return cast(dict[str, Any], response.json())
         except ValueError as exc:
             raise NewsServiceError(f"News response for {url} was not valid JSON.") from exc
+
+    @staticmethod
+    def _request_error_message(url: str, exc: httpx.HTTPError) -> str:
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            return f"News request failed for {url} with status {exc.response.status_code}."
+        return f"News request failed for {url}."
+
+    @staticmethod
+    def _source_warning(source_name: str, exc: NewsServiceError) -> str:
+        message = str(exc)
+        if "429" in message:
+            return f"{source_name} rate-limited the request; continuing without that source."
+        if "not valid JSON" in message:
+            return (
+                f"{source_name} returned an invalid response; continuing without that source."
+            )
+        return f"{source_name} fetch failed; continuing without that source."
 
     @staticmethod
     def _extract_feed_source(entry: dict[str, Any]) -> str:

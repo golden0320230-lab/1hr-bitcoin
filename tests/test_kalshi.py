@@ -12,21 +12,15 @@ from app.services.kalshi import KalshiClient
 from app.services.storage import DuckDBStorage
 
 
-def _build_http_client(
-    *,
-    btcd_markets: list[dict[str, Any]],
-    fallback_markets: list[dict[str, Any]] | None = None,
-) -> httpx.Client:
-    fallback_items = fallback_markets if fallback_markets is not None else []
-
+def _build_http_client(*, series_markets: list[dict[str, Any]]) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         if not request.url.path.endswith("/markets"):
             return httpx.Response(404, json={"error": "not found"})
 
-        if request.url.params.get("series_ticker") == "BTCD":
-            return httpx.Response(200, json={"cursor": "", "markets": btcd_markets})
+        if request.url.params.get("series_ticker") == "KXBTC15M":
+            return httpx.Response(200, json={"cursor": "", "markets": series_markets})
 
-        return httpx.Response(200, json={"cursor": "", "markets": fallback_items})
+        return httpx.Response(200, json={"cursor": "", "markets": []})
 
     return httpx.Client(
         transport=httpx.MockTransport(handler),
@@ -34,7 +28,7 @@ def _build_http_client(
     )
 
 
-def _hourly_btc_payload(
+def _fifteen_minute_btc_payload(
     *,
     ticker: str,
     threshold: float | None,
@@ -42,25 +36,25 @@ def _hourly_btc_payload(
     yes_ask: str,
     no_bid: str,
     no_ask: str,
-    close_time: str = "2026-03-19T20:00:00Z",
-    strike_type: str = "greater",
-    title: str = "Bitcoin price at Mar 19, 2026 at 4pm EDT?",
-    yes_sub_title: str = "$84,500 or above",
+    status: str = "active",
+    open_time: str = "2026-03-19T19:30:00Z",
+    close_time: str = "2026-03-19T19:45:00Z",
+    yes_sub_title: str = "Target Price: $84,500.00",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ticker": ticker,
-        "event_ticker": "BTCD-26MAR191600",
-        "title": title,
-        "status": "open",
+        "event_ticker": "KXBTC15M-26MAR191545",
+        "title": "BTC price up in next 15 mins?",
+        "status": status,
         "market_type": "binary",
-        "strike_type": strike_type,
+        "strike_type": "greater_or_equal",
         "yes_sub_title": yes_sub_title,
-        "no_sub_title": yes_sub_title,
-        "open_time": "2026-03-19T19:00:00Z",
+        "no_sub_title": "Target price: TBD",
+        "open_time": open_time,
         "close_time": close_time,
-        "expected_expiration_time": "2026-03-19T20:05:00Z",
-        "expiration_time": "2026-03-26T20:00:00Z",
-        "updated_time": "2026-03-19T19:20:00Z",
+        "expected_expiration_time": "2026-03-19T19:50:00Z",
+        "expiration_time": "2026-03-26T19:45:00Z",
+        "updated_time": "2026-03-19T19:35:00Z",
         "yes_bid_dollars": yes_bid,
         "yes_ask_dollars": yes_ask,
         "no_bid_dollars": no_bid,
@@ -70,7 +64,8 @@ def _hourly_btc_payload(
         "volume_fp": "12.00",
         "open_interest_fp": "45.00",
         "rules_primary": (
-            "If the CF Benchmarks settlement exceeds the strike, the market resolves to Yes."
+            "If the simple average of the sixty seconds of CF Benchmarks' BRTI before "
+            "expiration is at least the target price, the market resolves to Yes."
         ),
     }
     if threshold is not None:
@@ -78,47 +73,46 @@ def _hourly_btc_payload(
     return payload
 
 
-def test_get_live_btc_hourly_market_returns_best_live_candidate_and_stores_it(
-    tmp_path: Path,
-) -> None:
+def test_get_live_btc_market_returns_best_live_candidate_and_stores_it(tmp_path: Path) -> None:
     storage = DuckDBStorage(tmp_path / "kalshi_btc.duckdb")
     http_client = _build_http_client(
-        btcd_markets=[
-            _hourly_btc_payload(
-                ticker="BTCD-26MAR191600-T84500",
+        series_markets=[
+            _fifteen_minute_btc_payload(
+                ticker="KXBTC15M-26MAR191545-45",
                 threshold=84_500,
-                yes_bid="0.47",
-                yes_ask="0.51",
-                no_bid="0.49",
-                no_ask="0.53",
+                yes_bid="0.51",
+                yes_ask="0.53",
+                no_bid="0.47",
+                no_ask="0.49",
             ),
-            _hourly_btc_payload(
-                ticker="BTCD-26MAR191600-T86000",
-                threshold=86_000,
-                yes_bid="0.08",
-                yes_ask="0.12",
-                no_bid="0.88",
-                no_ask="0.92",
+            _fifteen_minute_btc_payload(
+                ticker="KXBTC15M-26MAR191545-50",
+                threshold=84_600,
+                yes_bid="0.88",
+                yes_ask="0.92",
+                no_bid="0.08",
+                no_ask="0.12",
+                yes_sub_title="Target Price: $84,600.00",
             ),
         ],
     )
     client = KalshiClient(
         http_client=http_client,
         storage=storage,
-        now_provider=lambda: datetime(2026, 3, 19, 19, 15, tzinfo=UTC),
+        now_provider=lambda: datetime(2026, 3, 19, 19, 36, tzinfo=UTC),
     )
 
     try:
-        discovered = client.get_live_btc_hourly_market()
+        discovered = client.get_live_btc_market()
         assert discovered is not None
 
         market, snapshot = discovered
-        assert market.ticker == "BTCD-26MAR191600-T84500"
+        assert market.ticker == "KXBTC15M-26MAR191545-45"
         assert market.direction == "ABOVE"
         assert market.threshold == 84_500
-        assert market.expires_at.isoformat() == "2026-03-19T20:00:00+00:00"
-        assert snapshot.yes_price == 0.49
-        assert snapshot.no_price == 0.51
+        assert market.expires_at.isoformat() == "2026-03-19T19:45:00+00:00"
+        assert snapshot.yes_price == 0.52
+        assert snapshot.no_price == 0.48
         assert storage.count_rows("markets") == 1
         assert storage.count_rows("market_snapshots") == 1
     finally:
@@ -126,27 +120,27 @@ def test_get_live_btc_hourly_market_returns_best_live_candidate_and_stores_it(
         storage.close()
 
 
-def test_get_live_btc_hourly_market_uses_subtitle_when_structured_strike_missing() -> None:
+def test_get_live_btc_market_uses_subtitle_when_structured_strike_missing() -> None:
     http_client = _build_http_client(
-        btcd_markets=[
-            _hourly_btc_payload(
-                ticker="BTCD-26MAR191600-T84500",
+        series_markets=[
+            _fifteen_minute_btc_payload(
+                ticker="KXBTC15M-26MAR191545-45",
                 threshold=None,
                 yes_bid="0.44",
                 yes_ask="0.48",
                 no_bid="0.52",
                 no_ask="0.56",
-                yes_sub_title="$84,500 or above",
+                yes_sub_title="Target Price: $84,500.00",
             )
         ]
     )
     client = KalshiClient(
         http_client=http_client,
-        now_provider=lambda: datetime(2026, 3, 19, 19, 15, tzinfo=UTC),
+        now_provider=lambda: datetime(2026, 3, 19, 19, 36, tzinfo=UTC),
     )
 
     try:
-        discovered = client.get_live_btc_hourly_market()
+        discovered = client.get_live_btc_market()
         assert discovered is not None
         market, _ = discovered
         assert market.threshold == 84_500
@@ -154,27 +148,28 @@ def test_get_live_btc_hourly_market_uses_subtitle_when_structured_strike_missing
         client.close()
 
 
-def test_get_live_btc_hourly_market_returns_none_when_no_live_hourly_btc_market_exists() -> None:
-    fallback_market = {
-        "ticker": "KXBTC15M-26MAR191500-00",
-        "event_ticker": "KXBTC15M-26MAR191500",
-        "title": "BTC price up in next 15 mins?",
-        "status": "initialized",
-        "open_time": "2026-03-19T19:00:00Z",
-        "close_time": "2026-03-19T19:15:00Z",
-        "updated_time": "2026-03-19T19:00:00Z",
-        "yes_bid_dollars": "0.51",
-        "yes_ask_dollars": "0.53",
-        "no_bid_dollars": "0.47",
-        "no_ask_dollars": "0.49",
-    }
-    http_client = _build_http_client(btcd_markets=[], fallback_markets=[fallback_market])
+def test_get_live_btc_market_returns_none_when_no_live_market_exists() -> None:
+    http_client = _build_http_client(
+        series_markets=[
+            _fifteen_minute_btc_payload(
+                ticker="KXBTC15M-26MAR191600-00",
+                threshold=84_500,
+                yes_bid="0.51",
+                yes_ask="0.53",
+                no_bid="0.47",
+                no_ask="0.49",
+                status="initialized",
+                open_time="2026-03-19T19:45:00Z",
+                close_time="2026-03-19T20:00:00Z",
+            )
+        ]
+    )
     client = KalshiClient(
         http_client=http_client,
-        now_provider=lambda: datetime(2026, 3, 19, 19, 15, tzinfo=UTC),
+        now_provider=lambda: datetime(2026, 3, 19, 19, 36, tzinfo=UTC),
     )
 
     try:
-        assert client.get_live_btc_hourly_market() is None
+        assert client.get_live_btc_market() is None
     finally:
         client.close()

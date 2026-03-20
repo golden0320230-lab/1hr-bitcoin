@@ -1,4 +1,4 @@
-"""Training dataset generation aligned to hourly market semantics."""
+"""Training dataset generation aligned to live Kalshi BTC market semantics."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ class TrainingDatasetBuilder:
         *,
         feature_builder: FeatureBuilder | None = None,
         dataset_path: str | Path = DEFAULT_DATASET_PATH,
-        strike_increment: float = 100.0,
+        strike_increment: float = 0.01,
         history_minutes: int = 60,
     ) -> None:
         if strike_increment <= 0:
@@ -132,7 +132,7 @@ class TrainingDatasetBuilder:
         self,
         candles: list[BTCCandle],
         *,
-        horizon_minutes: int = 60,
+        horizon_minutes: int = 15,
         step_candles: int = 1,
     ) -> pd.DataFrame:
         if horizon_minutes <= 0:
@@ -281,8 +281,12 @@ class TrainingDatasetBuilder:
     ) -> KalshiMarket:
         anchor_utc = anchor_time.astimezone(UTC)
         expiry_utc = expiry_time.astimezone(UTC)
+        horizon_minutes = int((expiry_utc - anchor_utc).total_seconds() // 60)
         ticker = f"HIST-{anchor_utc.strftime('%Y%m%d%H%M')}-{int(threshold)}"
-        title = f"Bitcoin above ${threshold:,.0f} at {expiry_utc.isoformat()}?"
+        if horizon_minutes == 15:
+            title = "BTC price up in next 15 mins?"
+        else:
+            title = f"Bitcoin above ${threshold:,.2f} at {expiry_utc.isoformat()}?"
         return KalshiMarket(
             ticker=ticker,
             title=title,

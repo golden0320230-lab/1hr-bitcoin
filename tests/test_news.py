@@ -142,3 +142,42 @@ def test_fetch_google_news_rss_and_gdelt_normalize_sources() -> None:
         assert gdelt_articles[0].summary == "Options activity increased sharply."
     finally:
         client.close()
+
+
+def test_fetch_recent_articles_tolerates_gdelt_rate_limit() -> None:
+    rss_xml = """
+    <rss version="2.0">
+      <channel>
+        <item>
+          <title>Bitcoin rebounds after selloff</title>
+          <link>https://example.com/rebound</link>
+          <pubDate>Thu, 19 Mar 2026 18:30:00 GMT</pubDate>
+          <description><![CDATA[<p>Bounce after dip</p>]]></description>
+          <source>Reuters</source>
+        </item>
+      </channel>
+    </rss>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith("https://news.google.com/rss/search"):
+            return httpx.Response(200, text=rss_xml)
+        if str(request.url).startswith(GDELT_DOC_API_URL):
+            return httpx.Response(429, json={"error": "rate limited"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = NewsClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now_provider=lambda: datetime(2026, 3, 19, 19, 0, tzinfo=UTC),
+    )
+
+    try:
+        articles = client.fetch_recent_articles(limit=5, lookback_hours=6)
+
+        assert len(articles) == 1
+        assert articles[0].source == "Reuters"
+        assert client.last_warnings == [
+            "GDELT rate-limited the request; continuing without that source."
+        ]
+    finally:
+        client.close()

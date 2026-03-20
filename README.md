@@ -1,9 +1,9 @@
-# Kalshi BTC 1-Hour Predictor CLI
+# Kalshi BTC 15-Minute Predictor CLI
 
-Research-only, local-first CLI for the live Kalshi Bitcoin 1-hour market.
+Research-only, local-first CLI for the live Kalshi Bitcoin 15-minute up/down market.
 
 The tool:
-- discovers the current live Kalshi BTC hourly market
+- discovers the current live Kalshi BTC 15-minute market
 - fetches current BTC spot and recent candles from Coinbase
 - ingests recent BTC-related news from Google News RSS and GDELT
 - optionally scores articles with a hosted KimiClaw endpoint
@@ -28,7 +28,7 @@ The CLI always prints or returns the disclaimer:
 ## Architecture
 
 The current project is organized around small service layers:
-- `app/services/kalshi.py`: live BTC hourly Kalshi market discovery and pricing snapshots
+- `app/services/kalshi.py`: live BTC 15-minute Kalshi market discovery and pricing snapshots
 - `app/services/coinbase.py`: public BTC spot, recent candles, and chunked historical candle fetches
 - `app/services/news.py`: Google News RSS and GDELT ingestion with deduplication and freshness filtering
 - `app/services/kimiclaw.py`: hosted structured article scoring with neutral fallback
@@ -86,7 +86,7 @@ KimiClaw is optional. If it is not configured or returns invalid output, the CLI
 
 ## Commands
 
-Show the live Kalshi BTC hourly market:
+Show the live Kalshi BTC 15-minute market:
 
 ```bash
 uv run btc-kalshi market
@@ -143,13 +143,13 @@ The CLI is designed to fail safely:
 
 ## Training and backtesting notes
 
-The training/backtest flow uses public BTC candles and generates historical examples aligned to the hourly market question:
+The training/backtest flow uses public BTC candles and generates historical examples aligned to the 15-minute market question:
 - prediction time `t`
-- threshold `X`
-- expiry `E`
-- label = whether BTC settles above or below `X` at `E`
+- target price `X`
+- expiry `E = t + 15 minutes`
+- label = whether BTC settles at or above `X` at `E`
 
-Because public historical Kalshi hourly orderbook data is not used in this baseline, the training dataset synthesizes the market framing around public BTC candles. That makes the task semantics correct, but it is still a baseline approximation rather than a full historical replay of Kalshi microstructure.
+Because public historical Kalshi 15-minute orderbook data is not used in this baseline, the training dataset synthesizes the market framing around public BTC candles. That keeps the live question semantics aligned, but it is still a baseline approximation rather than a full historical replay of Kalshi microstructure.
 
 Backtest baselines currently include:
 - `kalshi_follow`
@@ -169,7 +169,7 @@ Backtest baselines currently include:
 
 - The tool depends on live third-party APIs and can degrade when they fail.
 - News scoring quality depends on the external KimiClaw endpoint when configured.
-- Training and backtesting use a synthetic hourly-question framing from public BTC candles, not archived live Kalshi orderbook history.
+- Training and backtesting use a synthetic 15-minute-question framing from public BTC candles, not archived live Kalshi orderbook history.
 - The predictor is a research baseline. It is not calibrated for production trading.
 - No execution, brokerage, or automation layer exists in this repo by design.
 
