@@ -93,6 +93,20 @@ uv run btc-kalshi market
 uv run btc-kalshi market --json
 ```
 
+Monitor the live market until the `up` or `down` side reaches a target price:
+
+```bash
+uv run btc-kalshi monitor up 0.65
+uv run btc-kalshi monitor down 65 --poll-seconds 20 --max-checks 90
+uv run btc-kalshi monitor up 0.70 --json
+```
+
+Notes:
+- `up` watches the Kalshi yes price for the live 15-minute market.
+- `down` watches the Kalshi no price for the live 15-minute market.
+- `target_price` accepts either `0-1` dollars or `1-100` cents.
+- Monitoring is market-only and polls Kalshi at a bounded interval. It does not call Coinbase or news endpoints.
+
 Fetch recent BTC news:
 
 ```bash

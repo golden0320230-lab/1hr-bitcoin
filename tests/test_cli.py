@@ -182,6 +182,166 @@ def test_market_json_includes_warnings_field(monkeypatch) -> None:
     assert "\"warnings\": []" in result.output
 
 
+def test_monitor_json_reports_hit_when_side_reaches_target(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_monitor_hit.duckdb",
+            MODEL_PATH=tmp_path / "test_cli_monitor_hit.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    market = KalshiMarket(
+        ticker="KXBTC15M-26MAR191545-45",
+        title="BTC price up in next 15 mins?",
+        direction="ABOVE",
+        threshold=84_500,
+        expires_at="2026-03-19T19:45:00Z",
+    )
+    snapshots = iter(
+        [
+            MarketSnapshot(
+                ticker=market.ticker,
+                captured_at="2026-03-19T19:31:00Z",
+                yes_price=0.54,
+                no_price=0.46,
+                yes_bid=0.53,
+                yes_ask=0.55,
+                no_bid=0.45,
+                no_ask=0.47,
+            ),
+            MarketSnapshot(
+                ticker=market.ticker,
+                captured_at="2026-03-19T19:32:00Z",
+                yes_price=0.62,
+                no_price=0.38,
+                yes_bid=0.61,
+                yes_ask=0.63,
+                no_bid=0.37,
+                no_ask=0.39,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        cli.KalshiClient,
+        "get_live_btc_market",
+        lambda self: (market, next(snapshots)),
+    )
+
+    result = runner.invoke(
+        app,
+        ["monitor", "up", "0.60", "--poll-seconds", "15", "--max-checks", "2", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert "\"status\": \"hit\"" in result.output
+    assert "\"target_side\": \"up\"" in result.output
+    assert "\"observed_price\": 0.62" in result.output
+
+
+def test_monitor_json_reports_not_hit_after_max_checks(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_monitor_not_hit.duckdb",
+            MODEL_PATH=tmp_path / "test_cli_monitor_not_hit.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    market = KalshiMarket(
+        ticker="KXBTC15M-26MAR191545-45",
+        title="BTC price up in next 15 mins?",
+        direction="ABOVE",
+        threshold=84_500,
+        expires_at="2026-03-19T19:45:00Z",
+    )
+    snapshots = iter(
+        [
+            MarketSnapshot(
+                ticker=market.ticker,
+                captured_at="2026-03-19T19:31:00Z",
+                yes_price=0.54,
+                no_price=0.46,
+                yes_bid=0.53,
+                yes_ask=0.55,
+                no_bid=0.45,
+                no_ask=0.47,
+            ),
+            MarketSnapshot(
+                ticker=market.ticker,
+                captured_at="2026-03-19T19:32:00Z",
+                yes_price=0.56,
+                no_price=0.44,
+                yes_bid=0.55,
+                yes_ask=0.57,
+                no_bid=0.43,
+                no_ask=0.45,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        cli.KalshiClient,
+        "get_live_btc_market",
+        lambda self: (market, next(snapshots)),
+    )
+
+    result = runner.invoke(
+        app,
+        ["monitor", "up", "0.70", "--poll-seconds", "15", "--max-checks", "2", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert "\"status\": \"not_hit\"" in result.output
+    assert "Target price was not reached before monitoring stopped." in result.output
+
+
+def test_monitor_json_handles_missing_live_market(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_monitor_no_market.duckdb",
+            MODEL_PATH=tmp_path / "test_cli_monitor_no_market.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    responses = iter([None, None])
+    monkeypatch.setattr(
+        cli.KalshiClient,
+        "get_live_btc_market",
+        lambda self: next(responses),
+    )
+
+    result = runner.invoke(
+        app,
+        ["monitor", "down", "65", "--poll-seconds", "15", "--max-checks", "2", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert "\"status\": \"not_hit\"" in result.output
+    assert "\"target_price\": 0.65" in result.output
+    assert "No live BTC 15-minute Kalshi market found during monitoring." in result.output
+
+
 def test_news_command_outputs_articles(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,

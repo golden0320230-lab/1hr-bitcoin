@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging as stdlib_logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -128,6 +129,28 @@ def _render_warnings(warnings: list[str]) -> None:
     console.print("Warnings:")
     for warning in warnings:
         console.print(f"- {warning}")
+
+
+def _normalize_monitor_side(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"up", "down"}:
+        raise typer.BadParameter("Side must be either 'up' or 'down'.", param_hint="side")
+    return normalized
+
+
+def _normalize_monitor_price(value: float) -> float:
+    if 0 <= value <= 1:
+        return value
+    if 1 < value <= 100:
+        return round(value / 100, 4)
+    raise typer.BadParameter(
+        "Target price must be between 0 and 1, or between 1 and 100 cents.",
+        param_hint="target_price",
+    )
+
+
+def _monitor_side_price(side: str, yes_price: float, no_price: float) -> float:
+    return yes_price if side == "up" else no_price
 
 
 def _kimiclaw_fallback_used(scores: list[ArticleSentimentScore]) -> bool:
@@ -275,6 +298,137 @@ def market(
         )
     else:
         _render_market(market_payload)
+        console.print(RESEARCH_DISCLAIMER)
+
+
+@app.command()
+def monitor(
+    ctx: typer.Context,
+    side: str = typer.Argument(..., help="Which side price to monitor: up or down."),
+    target_price: float = typer.Argument(
+        ...,
+        help="Stop when the watched side reaches this price. Accepts 0-1 or 1-100 cents.",
+    ),
+    poll_seconds: int = typer.Option(
+        20,
+        "--poll-seconds",
+        min=15,
+        help="Seconds between Kalshi checks. Minimum 15 to avoid over-polling.",
+    ),
+    max_checks: int = typer.Option(
+        180,
+        "--max-checks",
+        min=1,
+        help="Maximum number of Kalshi polls before stopping.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+) -> None:
+    """Monitor the live Kalshi BTC 15-minute market until a side reaches a target price."""
+
+    runtime = _get_runtime(ctx)
+    normalized_side = _normalize_monitor_side(side)
+    normalized_target_price = _normalize_monitor_price(target_price)
+    warnings: list[str] = []
+    last_market_payload: dict[str, object] | None = None
+    last_observed_price: float | None = None
+
+    with KalshiClient(
+        storage=runtime.storage,
+        timeout_seconds=runtime.settings.http_timeout_seconds,
+    ) as client:
+        for check in range(1, max_checks + 1):
+            try:
+                discovered = client.get_live_btc_market()
+            except KalshiServiceError:
+                warning = "Kalshi market discovery failed during monitoring."
+                if warning not in warnings:
+                    warnings.append(warning)
+                discovered = None
+
+            if discovered is None:
+                if not json_output:
+                    console.print(
+                        f"[{check}/{max_checks}] No live BTC 15-minute Kalshi market found."
+                    )
+            else:
+                market_model, snapshot = discovered
+                yes_price = snapshot.yes_price or 0.0
+                no_price = snapshot.no_price or 0.0
+                watched_price = _monitor_side_price(normalized_side, yes_price, no_price)
+                last_observed_price = watched_price
+                last_market_payload = _market_payload(
+                    market_ticker=market_model.ticker,
+                    title=market_model.title,
+                    threshold=market_model.threshold,
+                    direction=market_model.direction,
+                    expires_at=market_model.expires_at.isoformat(),
+                    yes_price=yes_price,
+                    no_price=no_price,
+                )
+
+                if not json_output:
+                    minutes_to_expiry = max(
+                        int((market_model.expires_at - snapshot.captured_at).total_seconds() // 60),
+                        0,
+                    )
+                    console.print(
+                        f"[{check}/{max_checks}] {market_model.ticker} | "
+                        f"up {yes_price:.2%} | down {no_price:.2%} | "
+                        f"watching {normalized_side} for {normalized_target_price:.2%} | "
+                        f"expires in {minutes_to_expiry}m"
+                    )
+
+                if watched_price >= normalized_target_price:
+                    payload = {
+                        "status": "hit",
+                        "target_side": normalized_side,
+                        "target_price": normalized_target_price,
+                        "observed_price": watched_price,
+                        "checks": check,
+                        "market": last_market_payload,
+                        "warnings": warnings,
+                        "disclaimer": RESEARCH_DISCLAIMER,
+                    }
+                    if json_output:
+                        _json_echo(payload)
+                    else:
+                        console.print(
+                            f"Target hit: {normalized_side} reached {watched_price:.2%} "
+                            f"(target {normalized_target_price:.2%})."
+                        )
+                        _render_market(last_market_payload)
+                        _render_warnings(warnings)
+                        console.print(RESEARCH_DISCLAIMER)
+                    return
+
+            if check < max_checks:
+                time.sleep(poll_seconds)
+
+    if last_market_payload is None:
+        warnings.append("No live BTC 15-minute Kalshi market found during monitoring.")
+    else:
+        warnings.append("Target price was not reached before monitoring stopped.")
+
+    payload = {
+        "status": "not_hit",
+        "target_side": normalized_side,
+        "target_price": normalized_target_price,
+        "observed_price": last_observed_price,
+        "checks": max_checks,
+        "market": last_market_payload,
+        "warnings": warnings,
+        "disclaimer": RESEARCH_DISCLAIMER,
+    }
+    if json_output:
+        _json_echo(payload)
+    else:
+        console.print(
+            f"Monitor stopped after {max_checks} checks without reaching "
+            f"{normalized_target_price:.2%} on {normalized_side}."
+        )
+        if last_market_payload is not None:
+            _render_market(last_market_payload)
+        _render_warnings(warnings)
         console.print(RESEARCH_DISCLAIMER)
 
 
