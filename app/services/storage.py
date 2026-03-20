@@ -583,6 +583,36 @@ class DuckDBStorage:
             ],
         )
 
+    def get_prediction_run(self, run_id: str) -> PredictionResult | None:
+        row = self.connection.execute(
+            """
+            SELECT prediction_json
+            FROM prediction_runs
+            WHERE run_id = ?
+            """,
+            [run_id],
+        ).fetchone()
+        if row is None:
+            return None
+
+        payload = orjson.loads(row[0])
+        return PredictionResult.model_validate(payload)
+
+    def get_latest_prediction_run(self) -> PredictionResult | None:
+        row = self.connection.execute(
+            """
+            SELECT prediction_json
+            FROM prediction_runs
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+
+        payload = orjson.loads(row[0])
+        return PredictionResult.model_validate(payload)
+
     def insert_model_metadata(
         self,
         *,

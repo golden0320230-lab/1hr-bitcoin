@@ -17,6 +17,7 @@ from app.config import Settings, get_settings
 from app.constants import APP_NAME, CLI_NAME, RESEARCH_DISCLAIMER
 from app.logging import configure_logging, get_logger
 from app.services.coinbase import CoinbaseClient, CoinbaseServiceError
+from app.services.explain import ExplainService
 from app.services.features import FeatureBuilder
 from app.services.kalshi import KalshiClient
 from app.services.kimiclaw import KimiClawClient
@@ -398,12 +399,53 @@ def backtest(ctx: typer.Context) -> None:
 
 
 @app.command()
-def explain(ctx: typer.Context) -> None:
+def explain(
+    ctx: typer.Context,
+    last: bool = typer.Option(
+        True,
+        "--last/--no-last",
+        help="Show the latest saved prediction run.",
+    ),
+) -> None:
     """Inspect the latest saved prediction run."""
 
     runtime = _get_runtime(ctx)
-    runtime.logger.info("explain command will be implemented in a later issue.")
-    console.print("explain: Prediction explanations arrive in issue 11.")
+    if not last:
+        raise typer.BadParameter("Only --last is currently supported.", param_hint="--last")
+
+    service = ExplainService(runtime.storage)
+    prediction = service.get_last_prediction()
+
+    if prediction is None:
+        console.print("No saved prediction run found.")
+        console.print(RESEARCH_DISCLAIMER)
+        return
+
+    market = prediction.market
+    features = prediction.feature_vector
+    if market is not None:
+        console.print(f"Live market: {market.title}")
+        console.print(f"Kalshi ticker: {market.ticker}")
+    console.print(f"Prediction: {prediction.label}")
+    console.print(f"Probability: {prediction.probability:.2%}")
+    console.print(f"Confidence: {prediction.confidence}")
+    console.print("Main drivers:")
+    for driver in prediction.drivers:
+        console.print(f"- {driver}")
+    if features is not None:
+        console.print("Feature values:")
+        console.print(f"- Spot price: ${features.spot_price:,.2f}")
+        console.print(f"- Strike price: ${features.strike_price:,.2f}")
+        console.print(f"- Distance to strike: {features.distance_to_strike:+.2f}")
+        console.print(f"- Market implied probability: {features.market_implied_probability:.2%}")
+        console.print(f"- Return 15m: {features.return_15m:+.2%}")
+        console.print(f"- Return 60m: {features.return_60m:+.2%}")
+        console.print(f"- News weighted impact: {features.news_weighted_impact:+.2f}")
+        console.print(f"- Minutes to expiry: {features.minutes_to_expiry}")
+    if prediction.warnings:
+        console.print("Warnings:")
+        for warning in prediction.warnings:
+            console.print(f"- {warning}")
     console.print(RESEARCH_DISCLAIMER)
 
 
