@@ -34,6 +34,14 @@ def test_text_utils_strip_html_and_truncate() -> None:
     assert fingerprint_article("Title", "<b>Summary</b>") == fingerprint_article("Title", "Summary")
 
 
+def test_sanitize_text_removes_script_content() -> None:
+    cleaned = sanitize_text(
+        "<div>Headline<script>alert('x')</script><style>.x{}</style>Summary</div>"
+    )
+
+    assert cleaned == "Headline Summary"
+
+
 def test_news_client_filters_stale_and_duplicate_articles_before_storage(tmp_path: Path) -> None:
     rss_xml = """
     <rss version="2.0">

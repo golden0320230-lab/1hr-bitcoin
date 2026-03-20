@@ -100,13 +100,15 @@ class KimiClawClient:
         ]
 
     def build_prompt(self, article: NewsArticle) -> str:
+        title = truncate_text(sanitize_text(article.title), max_chars=240)
+        source = truncate_text(sanitize_text(article.source), max_chars=120)
         summary = sanitize_text(article.summary or "")
         payload = "\n".join(
             [
                 self._prompt_template.strip(),
                 "",
-                f"Title: {sanitize_text(article.title)}",
-                f"Source: {sanitize_text(article.source)}",
+                f"Title: {title}",
+                f"Source: {source}",
                 f"Published at (UTC): {article.published_at.isoformat()}",
                 f"URL: {article.url}",
                 "Summary:",

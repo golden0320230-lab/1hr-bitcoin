@@ -109,3 +109,32 @@ def test_score_article_can_raise_without_fallback() -> None:
             client.score_article(_article(), allow_fallback=False)
     finally:
         client.close()
+
+
+def test_build_prompt_sanitizes_html_and_truncates_untrusted_article_content() -> None:
+    article = NewsArticle(
+        title="<script>alert('x')</script>Bitcoin headline " + ("A" * 400),
+        url="https://example.com/unsafe",
+        source="<b>Example Wire</b>",
+        published_at="2026-03-19T18:30:00Z",
+        summary="<p>Fresh update</p><script>malicious()</script>" + ("B" * 4_000),
+    )
+    client = KimiClawClient(
+        base_url="https://kimi.example.com",
+        api_key="test-key",
+        model_name="kimi-btc-v1",
+        http_client=_build_http_client(),
+        max_article_chars=120,
+        now_provider=lambda: datetime(2026, 3, 19, 19, 0, tzinfo=UTC),
+    )
+
+    try:
+        prompt = client.build_prompt(article)
+
+        assert "<script>" not in prompt
+        assert "malicious()" not in prompt
+        assert "Title: Bitcoin headline" in prompt
+        assert "Source: Example Wire" in prompt
+        assert len(prompt) < 1_000
+    finally:
+        client.close()

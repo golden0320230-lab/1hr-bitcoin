@@ -15,6 +15,9 @@ def strip_html(value: str) -> str:
     """Remove HTML tags and decode entities from a text fragment."""
 
     soup = BeautifulSoup(value, "html.parser")
+    for tag_name in ("script", "style", "noscript"):
+        for tag in soup.find_all(tag_name):
+            tag.decompose()
     return unescape(soup.get_text(" ", strip=True))
 
 

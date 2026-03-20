@@ -506,3 +506,55 @@ def test_predict_uses_cached_candles_when_coinbase_fetch_fails(monkeypatch, tmp_
     assert result.exit_code == 0
     assert "Using cached BTC candles for feature generation." in result.output
     assert "\"prediction\"" in result.output
+
+
+def test_predict_human_output_stays_research_only(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH=tmp_path / "test_cli_predict_safe.duckdb",
+            MODEL_PATH=tmp_path / "missing.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+
+    market = KalshiMarket(
+        ticker="BTCD-26MAR191600-T84500",
+        title="Bitcoin price at Mar 19, 2026 at 4pm EDT?",
+        direction="ABOVE",
+        threshold=84_500,
+        expires_at="2026-03-19T20:00:00Z",
+    )
+    snapshot = MarketSnapshot(
+        ticker=market.ticker,
+        captured_at="2026-03-19T19:30:00Z",
+        yes_price=0.51,
+        no_price=0.49,
+        yes_bid=0.5,
+        yes_ask=0.52,
+        no_bid=0.48,
+        no_ask=0.5,
+    )
+
+    monkeypatch.setattr(
+        cli.KalshiClient,
+        "get_live_btc_hourly_market",
+        lambda self: (market, snapshot),
+    )
+    monkeypatch.setattr(cli.CoinbaseClient, "get_spot_price", lambda self: 84_700.0)
+    monkeypatch.setattr(
+        cli.CoinbaseClient,
+        "get_candles",
+        lambda self, lookback_minutes, timeframe: _predict_candles(),
+    )
+
+    result = runner.invoke(app, ["predict", "--no-news"])
+
+    assert result.exit_code == 0
+    assert "Research only. Not financial advice. No trade execution performed." in result.output
+    assert "buy" not in result.output.lower()
+    assert "sell" not in result.output.lower()
