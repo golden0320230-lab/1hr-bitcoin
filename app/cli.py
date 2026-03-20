@@ -94,8 +94,8 @@ def _render_market(market_payload: Mapping[str, object]) -> None:
     table.add_row("Expiry", str(market_payload["expires_at"]))
     table.add_row("Yes", f"{yes_price:.2%}")
     table.add_row("No", f"{no_price:.2%}")
+    table.add_row("Implied prior", f"{yes_price:.2%}")
     console.print(table)
-    console.print(RESEARCH_DISCLAIMER)
 
 
 def _market_payload(
@@ -106,7 +106,7 @@ def _market_payload(
     expires_at: str,
     yes_price: float,
     no_price: float,
-    ) -> dict[str, object]:
+) -> dict[str, object]:
     return cast(
         dict[str, object],
         {
@@ -119,6 +119,15 @@ def _market_payload(
             "no_price": no_price,
         },
     )
+
+
+def _render_warnings(warnings: list[str]) -> None:
+    if not warnings:
+        return
+
+    console.print("Warnings:")
+    for warning in warnings:
+        console.print(f"- {warning}")
 
 
 def _kimiclaw_fallback_used(scores: list[ArticleSentimentScore]) -> bool:
@@ -257,9 +266,16 @@ def market(
     )
 
     if json_output:
-        _json_echo({"market": market_payload, "disclaimer": RESEARCH_DISCLAIMER})
+        _json_echo(
+            {
+                "market": market_payload,
+                "warnings": [],
+                "disclaimer": RESEARCH_DISCLAIMER,
+            }
+        )
     else:
         _render_market(market_payload)
+        console.print(RESEARCH_DISCLAIMER)
 
 
 @app.command()
@@ -317,8 +333,7 @@ def news(
         )
 
     console.print(table)
-    for warning in warnings:
-        console.print(warning)
+    _render_warnings(warnings)
     console.print(RESEARCH_DISCLAIMER)
 
 
@@ -491,10 +506,8 @@ def predict(
     for driver in result.drivers:
         console.print(f"- {driver}")
 
-    if verbose and result.warnings:
-        console.print("Warnings:")
-        for warning in result.warnings:
-            console.print(f"- {warning}")
+    _render_warnings(result.warnings)
+    if verbose:
         console.print(f"Articles considered: {len(articles)}")
 
     console.print(RESEARCH_DISCLAIMER)
@@ -545,14 +558,17 @@ def train(
     if json_output:
         _json_echo(
             {
-                "model_name": result.model_name,
-                "artifact_path": str(result.artifact_path),
-                "dataset_path": str(saved_dataset.path),
-                "dataset_rows": result.dataset_rows,
-                "feature_schema_version": result.feature_schema_version,
-                "training_window_start": result.training_window_start.isoformat(),
-                "training_window_end": result.training_window_end.isoformat(),
-                "metrics": result.metrics,
+                "training": {
+                    "model_name": result.model_name,
+                    "artifact_path": str(result.artifact_path),
+                    "dataset_path": str(saved_dataset.path),
+                    "dataset_rows": result.dataset_rows,
+                    "feature_schema_version": result.feature_schema_version,
+                    "training_window_start": result.training_window_start.isoformat(),
+                    "training_window_end": result.training_window_end.isoformat(),
+                    "metrics": result.metrics,
+                },
+                "warnings": [],
                 "disclaimer": RESEARCH_DISCLAIMER,
             }
         )
@@ -614,6 +630,7 @@ def backtest(
         _json_echo(
             {
                 "backtest": result.model_dump(mode="json"),
+                "warnings": [],
                 "disclaimer": RESEARCH_DISCLAIMER,
             }
         )
@@ -643,6 +660,7 @@ def explain(
         "--last/--no-last",
         help="Show the latest saved prediction run.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
 ) -> None:
     """Inspect the latest saved prediction run."""
 
@@ -654,8 +672,26 @@ def explain(
     prediction = service.get_last_prediction()
 
     if prediction is None:
-        console.print("No saved prediction run found.")
-        console.print(RESEARCH_DISCLAIMER)
+        payload = {
+            "prediction": None,
+            "warnings": ["No saved prediction run found."],
+            "disclaimer": RESEARCH_DISCLAIMER,
+        }
+        if json_output:
+            _json_echo(payload)
+        else:
+            console.print("No saved prediction run found.")
+            console.print(RESEARCH_DISCLAIMER)
+        return
+
+    if json_output:
+        _json_echo(
+            {
+                "prediction": prediction.model_dump(mode="json"),
+                "warnings": prediction.warnings,
+                "disclaimer": RESEARCH_DISCLAIMER,
+            }
+        )
         return
 
     market = prediction.market
@@ -679,10 +715,7 @@ def explain(
         console.print(f"- Return 60m: {features.return_60m:+.2%}")
         console.print(f"- News weighted impact: {features.news_weighted_impact:+.2f}")
         console.print(f"- Minutes to expiry: {features.minutes_to_expiry}")
-    if prediction.warnings:
-        console.print("Warnings:")
-        for warning in prediction.warnings:
-            console.print(f"- {warning}")
+    _render_warnings(prediction.warnings)
     console.print(RESEARCH_DISCLAIMER)
 
 
