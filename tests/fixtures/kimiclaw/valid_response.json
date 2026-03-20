@@ -2,7 +2,7 @@
   "choices": [
     {
       "message": {
-        "content": "{\"sentiment\":\"bullish\",\"relevance\":0.82,\"impact_horizon_minutes\":45,\"impact_score\":0.35,\"confidence\":0.74,\"reason\":\"ETF inflow headline may support BTC.\"}"
+        "content": "{\"market_call\":\"UP\",\"sentiment\":\"bullish\",\"relevance\":0.82,\"impact_horizon_minutes\":45,\"impact_score\":0.35,\"confidence\":0.74,\"reason\":\"ETF inflow headline may support BTC.\"}"
       }
     }
   ]

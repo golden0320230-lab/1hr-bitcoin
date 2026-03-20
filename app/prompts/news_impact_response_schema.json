@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market_call",
+    "sentiment",
+    "relevance",
+    "impact_horizon_minutes",
+    "impact_score",
+    "confidence",
+    "reason"
+  ],
+  "properties": {
+    "market_call": {
+      "type": "string",
+      "enum": ["UP", "DOWN", "NEUTRAL"]
+    },
+    "sentiment": {
+      "type": "string",
+      "enum": ["bullish", "bearish", "neutral"]
+    },
+    "relevance": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "impact_horizon_minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 240
+    },
+    "impact_score": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

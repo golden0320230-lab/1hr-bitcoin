@@ -10,7 +10,11 @@ from typing import Any, cast
 import httpx
 import orjson
 
-from app.schemas import ArticleSentimentScore, NewsArticle
+from app.schemas import (
+    ArticleSentimentScore,
+    NewsArticle,
+    normalize_reviewer_market_call,
+)
 from app.services.storage import DuckDBStorage
 from app.utils.retries import retry_operation
 from app.utils.text import sanitize_text, truncate_text
@@ -66,14 +70,19 @@ class KimiClawClient:
         try:
             response_payload = self._request_score(article)
             parsed_json = self._extract_json_payload(response_payload)
+            impact_score = parsed_json["impact_score"]
             score = ArticleSentimentScore(
                 article_url=article.url,
                 model_name=self.model_name,
                 scored_at=self._now_provider(),
+                market_call=normalize_reviewer_market_call(
+                    parsed_json.get("market_call"),
+                    impact_score=impact_score,
+                ),
                 sentiment=parsed_json["sentiment"],
                 relevance=parsed_json["relevance"],
                 impact_horizon_minutes=parsed_json["impact_horizon_minutes"],
-                impact_score=parsed_json["impact_score"],
+                impact_score=impact_score,
                 confidence=parsed_json["confidence"],
                 reason=parsed_json["reason"],
                 raw_response=response_payload,
@@ -103,16 +112,22 @@ class KimiClawClient:
         title = truncate_text(sanitize_text(article.title), max_chars=240)
         source = truncate_text(sanitize_text(article.source), max_chars=120)
         summary = sanitize_text(article.summary or "")
+        article_payload = orjson.dumps(
+            {
+                "title": title,
+                "source": source,
+                "published_at_utc": article.published_at.isoformat(),
+                "url": str(article.url),
+                "summary": truncate_text(summary, max_chars=self.max_article_chars),
+            },
+            option=orjson.OPT_INDENT_2,
+        ).decode("utf-8")
         payload = "\n".join(
             [
                 self._prompt_template.strip(),
                 "",
-                f"Title: {title}",
-                f"Source: {source}",
-                f"Published at (UTC): {article.published_at.isoformat()}",
-                f"URL: {article.url}",
-                "Summary:",
-                truncate_text(summary, max_chars=self.max_article_chars),
+                "Article payload JSON:",
+                article_payload,
             ]
         )
         return payload.strip()
@@ -187,6 +202,7 @@ class KimiClawClient:
             article_url=article.url,
             model_name=self.model_name,
             scored_at=self._now_provider(),
+            market_call="NEUTRAL",
             sentiment="neutral",
             relevance=0.0,
             impact_horizon_minutes=60,

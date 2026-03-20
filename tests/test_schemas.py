@@ -72,6 +72,7 @@ def test_article_sentiment_rejects_out_of_range_payload() -> None:
             article_url="https://example.com/bitcoin-etf",
             model_name="kimi-claw-v1",
             scored_at="2026-03-19T20:05:00Z",
+            market_call="UP",
             sentiment="bullish",
             relevance=1.2,
             impact_horizon_minutes=45,

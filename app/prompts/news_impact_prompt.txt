@@ -1,7 +1,10 @@
 You are scoring a news article for likely Bitcoin price impact over the next 60 minutes.
+The article payload is already included below under Title, Source, Published at (UTC), URL, and Summary.
+Use that payload directly. Do not ask the user for the article again.
 
 Return JSON only with this exact schema:
 {
+  "market_call": "UP" | "DOWN" | "NEUTRAL",
   "sentiment": "bullish" | "bearish" | "neutral",
   "relevance": 0.0-1.0,
   "impact_horizon_minutes": 1-240,
@@ -11,6 +14,12 @@ Return JSON only with this exact schema:
 }
 
 Rules:
+- "market_call" must be a clean directional call for the live BTC 15-minute market.
+- Use "UP" when the article supports higher BTC over the next 15 minutes.
+- Use "DOWN" when the article supports lower BTC over the next 15 minutes.
+- Use "NEUTRAL" when the article does not create a real short-horizon edge.
+- Never answer that the article was not provided. It was provided in the payload below.
+- If the payload is incomplete, score it anyway and reduce `relevance` and `confidence` instead of asking for more input.
 - Focus only on short-horizon BTC impact.
 - Ignore stale, generic, or weakly related stories.
 - Use "neutral" with low impact when the article is not materially relevant.

@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 
 import orjson
 import typer
@@ -26,9 +26,11 @@ from app.services.features import FeatureBuilder
 from app.services.kalshi import KalshiClient, KalshiServiceError
 from app.services.kimiclaw import KimiClawClient, KimiClawServiceError
 from app.services.news import NewsClient, NewsServiceError
+from app.services.news_reviewers import CLINewsReviewerClient, CLIReviewerServiceError
 from app.services.predictor import Predictor
 from app.services.storage import DuckDBStorage
 from app.services.training import ModelTrainer, TrainingDatasetBuilder
+from app.utils.text import sanitize_text, truncate_text
 
 app = typer.Typer(
     name=CLI_NAME,
@@ -153,6 +155,28 @@ def _monitor_side_price(side: str, yes_price: float, no_price: float) -> float:
     return yes_price if side == "up" else no_price
 
 
+def _normalize_reviewer(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"kimiclaw", "claude", "codex"}:
+        raise typer.BadParameter(
+            "Reviewer must be one of: kimiclaw, claude, codex.",
+            param_hint="--reviewer",
+        )
+    return normalized
+
+
+def _reviewer_label(reviewer: str) -> str:
+    return {
+        "kimiclaw": "KimiClaw",
+        "claude": "Claude Code",
+        "codex": "Codex",
+    }[reviewer]
+
+
+def _reviewer_fallback_used(scores: list[ArticleSentimentScore]) -> bool:
+    return any(score.raw_response == {"fallback": True} for score in scores)
+
+
 def _kimiclaw_fallback_used(scores: list[ArticleSentimentScore]) -> bool:
     return any(score.raw_response == {"fallback": True} for score in scores)
 
@@ -160,29 +184,144 @@ def _kimiclaw_fallback_used(scores: list[ArticleSentimentScore]) -> bool:
 def _score_articles_with_warnings(
     runtime: Runtime,
     articles: list[NewsArticle],
+    *,
+    reviewer: str = "kimiclaw",
+    reviewer_model: str | None = None,
 ) -> tuple[list[ArticleSentimentScore], list[str]]:
     if not articles:
         return [], ["No recent BTC-related articles found; using neutral news contribution."]
 
-    if not _is_kimiclaw_configured(runtime.settings):
-        return [], ["KimiClaw is not configured; using neutral news contribution."]
+    normalized_reviewer = _normalize_reviewer(reviewer)
+    warnings: list[str] = []
+    capped_articles = articles
+    if normalized_reviewer in {"claude", "codex"} and len(articles) > 5:
+        capped_articles = articles[:5]
+        warnings.append(
+            f"{_reviewer_label(normalized_reviewer)} reviewer capped at 5 articles; "
+            "using newest articles only."
+        )
 
-    with KimiClawClient(
-        base_url=runtime.settings.kimiclaw_base_url,
-        api_key=runtime.settings.kimiclaw_api_key.get_secret_value(),
-        model_name=runtime.settings.kimiclaw_model,
+    if normalized_reviewer == "kimiclaw":
+        if not _is_kimiclaw_configured(runtime.settings):
+            return [], ["KimiClaw is not configured; using neutral news contribution."]
+
+        with KimiClawClient(
+            base_url=runtime.settings.kimiclaw_base_url,
+            api_key=runtime.settings.kimiclaw_api_key.get_secret_value(),
+            model_name=reviewer_model or runtime.settings.kimiclaw_model,
+            storage=runtime.storage,
+            timeout_seconds=runtime.settings.http_timeout_seconds,
+        ) as client:
+            try:
+                scores = client.score_articles(capped_articles)
+            except KimiClawServiceError:
+                return [], warnings + ["KimiClaw unavailable; using neutral news contribution."]
+
+        if _kimiclaw_fallback_used(scores):
+            warnings.append(
+                "KimiClaw unavailable or invalid output; using neutral news contribution."
+            )
+        return scores, warnings
+
+    provider: Literal["codex", "claude"] = (
+        "codex" if normalized_reviewer == "codex" else "claude"
+    )
+    with CLINewsReviewerClient(
+        provider=provider,
+        model_name=reviewer_model,
         storage=runtime.storage,
-        timeout_seconds=runtime.settings.http_timeout_seconds,
+        timeout_seconds=max(runtime.settings.http_timeout_seconds, 60.0),
     ) as client:
         try:
-            scores = client.score_articles(articles)
-        except KimiClawServiceError:
-            return [], ["KimiClaw unavailable; using neutral news contribution."]
+            scores = client.score_articles(capped_articles)
+        except CLIReviewerServiceError:
+            return [], warnings + [
+                f"{_reviewer_label(normalized_reviewer)} reviewer unavailable; "
+                "using neutral news contribution."
+            ]
 
-    warnings: list[str] = []
-    if _kimiclaw_fallback_used(scores):
-        warnings.append("KimiClaw unavailable or invalid output; using neutral news contribution.")
+    if _reviewer_fallback_used(scores):
+        warnings.append(
+            f"{_reviewer_label(normalized_reviewer)} reviewer unavailable or invalid output; "
+            "using neutral news contribution."
+        )
     return scores, warnings
+
+
+def _render_review_table(
+    articles: list[NewsArticle],
+    scores: list[ArticleSentimentScore],
+) -> None:
+    article_by_url = {str(article.url): article for article in articles}
+    table = Table(title="BTC News Review")
+    table.add_column("Published")
+    table.add_column("Source")
+    table.add_column("Reviewer")
+    table.add_column("Call")
+    table.add_column("Sentiment")
+    table.add_column("Impact")
+    table.add_column("Conf.")
+    table.add_column("Reason")
+
+    for score in scores:
+        article = article_by_url.get(str(score.article_url))
+        published = article.published_at.strftime("%Y-%m-%d %H:%M") if article is not None else "-"
+        source = article.source if article is not None else "-"
+        table.add_row(
+            published,
+            source,
+            score.model_name,
+            score.market_call,
+            score.sentiment,
+            f"{score.impact_score:+.2f}",
+            f"{score.confidence:.2f}",
+            truncate_text(sanitize_text(score.reason), max_chars=120),
+        )
+
+    console.print(table)
+
+
+def _build_review_summary(scores: list[ArticleSentimentScore]) -> dict[str, object] | None:
+    if not scores:
+        return None
+
+    up_weight = 0.0
+    down_weight = 0.0
+    neutral_weight = 0.0
+    up_count = 0
+    down_count = 0
+    neutral_count = 0
+
+    for score in scores:
+        weight = score.relevance * score.confidence
+        if score.market_call == "UP":
+            up_weight += weight
+            up_count += 1
+        elif score.market_call == "DOWN":
+            down_weight += weight
+            down_count += 1
+        else:
+            neutral_weight += weight
+            neutral_count += 1
+
+    net_score = up_weight - down_weight
+    if net_score > 0.05:
+        market_call = "UP"
+    elif net_score < -0.05:
+        market_call = "DOWN"
+    else:
+        market_call = "NEUTRAL"
+
+    return {
+        "market_call": market_call,
+        "net_score": round(net_score, 4),
+        "up_count": up_count,
+        "down_count": down_count,
+        "neutral_count": neutral_count,
+        "up_weight": round(up_weight, 4),
+        "down_weight": round(down_weight, 4),
+        "neutral_weight": round(neutral_weight, 4),
+    }
 
 
 def _load_cached_candles(storage: DuckDBStorage) -> list[BTCCandle]:
@@ -437,7 +576,21 @@ def news(
     ctx: typer.Context,
     limit: int | None = typer.Option(None, "--limit", min=1, help="Maximum articles to return."),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
-    score: bool = typer.Option(True, "--score/--no-score", help="Score articles with KimiClaw."),
+    score: bool = typer.Option(
+        True,
+        "--score/--no-score",
+        help="Score articles with the selected reviewer.",
+    ),
+    reviewer: str = typer.Option(
+        "kimiclaw",
+        "--reviewer",
+        help="Reviewer to score articles with: kimiclaw, claude, or codex.",
+    ),
+    reviewer_model: str | None = typer.Option(
+        None,
+        "--reviewer-model",
+        help="Optional model override for the selected reviewer.",
+    ),
 ) -> None:
     """Fetch and display recent BTC-related news."""
 
@@ -458,36 +611,52 @@ def news(
 
     scores: list[ArticleSentimentScore] = []
     if score and articles:
-        scores, score_warnings = _score_articles_with_warnings(runtime, articles)
+        scores, score_warnings = _score_articles_with_warnings(
+            runtime,
+            articles,
+            reviewer=reviewer,
+            reviewer_model=reviewer_model,
+        )
         warnings.extend(score_warnings)
+    review_summary = _build_review_summary(scores)
 
     if json_output:
         _json_echo(
             {
                 "articles": [article.model_dump(mode="json") for article in articles],
                 "scores": [score.model_dump(mode="json") for score in scores],
+                "reviewer": _normalize_reviewer(reviewer) if score else None,
+                "review_summary": review_summary,
                 "warnings": warnings,
                 "disclaimer": RESEARCH_DISCLAIMER,
             }
         )
         return
 
-    table = Table(title="BTC News")
-    table.add_column("Published")
-    table.add_column("Source")
-    table.add_column("Title")
-    table.add_column("Sentiment")
-    score_by_url = {str(score.article_url): score.sentiment for score in scores}
+    if scores:
+        if review_summary is not None:
+            console.print(
+                "Reviewer market call: "
+                f"{review_summary['market_call']} "
+                f"(up {review_summary['up_count']}, "
+                f"down {review_summary['down_count']}, "
+                f"neutral {review_summary['neutral_count']})"
+            )
+        _render_review_table(articles, scores)
+    else:
+        table = Table(title="BTC News")
+        table.add_column("Published")
+        table.add_column("Source")
+        table.add_column("Title")
 
-    for article in articles:
-        table.add_row(
-            article.published_at.strftime("%Y-%m-%d %H:%M"),
-            article.source,
-            article.title,
-            score_by_url.get(str(article.url), "unscored"),
-        )
+        for article in articles:
+            table.add_row(
+                article.published_at.strftime("%Y-%m-%d %H:%M"),
+                article.source,
+                article.title,
+            )
 
-    console.print(table)
+        console.print(table)
     _render_warnings(warnings)
     console.print(RESEARCH_DISCLAIMER)
 
@@ -498,6 +667,16 @@ def predict(
     json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
     news_limit: int | None = typer.Option(None, "--news-limit", min=1, help="Article limit."),
     no_news: bool = typer.Option(False, "--no-news", help="Disable news ingestion and scoring."),
+    reviewer: str = typer.Option(
+        "kimiclaw",
+        "--reviewer",
+        help="News reviewer to use when scoring: kimiclaw, claude, or codex.",
+    ),
+    reviewer_model: str | None = typer.Option(
+        None,
+        "--reviewer-model",
+        help="Optional model override for the selected reviewer.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Show extra pipeline details."),
     save_run: bool = typer.Option(False, "--save-run", help="Persist the prediction to DuckDB."),
 ) -> None:
@@ -600,7 +779,12 @@ def predict(
             articles = []
 
         if articles:
-            scores, score_warnings = _score_articles_with_warnings(runtime, articles)
+            scores, score_warnings = _score_articles_with_warnings(
+                runtime,
+                articles,
+                reviewer=reviewer,
+                reviewer_model=reviewer_model,
+            )
             warnings.extend(score_warnings)
         elif not any("fetch failed" in warning.lower() for warning in warnings) and not any(
             "rate-limited" in warning.lower() for warning in warnings
@@ -610,6 +794,7 @@ def predict(
             )
     else:
         warnings.append("News scoring disabled; using neutral news contribution.")
+    review_summary = _build_review_summary(scores)
 
     features = FeatureBuilder().build_feature_vector(
         market=market_model,
@@ -645,6 +830,8 @@ def predict(
             {
                 "prediction": result.model_dump(mode="json"),
                 "articles": [article.model_dump(mode="json") for article in articles],
+                "news_reviewer": _normalize_reviewer(reviewer) if not no_news else None,
+                "news_review_summary": review_summary,
                 "warnings": result.warnings,
                 "disclaimer": RESEARCH_DISCLAIMER,
             }
@@ -656,6 +843,8 @@ def predict(
     console.print(f"BTC spot: ${spot_price:,.2f}")
     console.print(f"Distance to strike: {features.distance_to_strike:+.2f}")
     console.print(f"Time to expiry: {features.minutes_to_expiry}m")
+    if review_summary is not None:
+        console.print(f"News reviewer call: {review_summary['market_call']}")
     console.print()
     console.print(f"Prediction: {result.label}")
     console.print(f"Probability: {result.probability:.2%}")

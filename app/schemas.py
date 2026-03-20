@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, HttpUrl, model_validator
@@ -15,6 +15,7 @@ MarketStatus = Literal["open", "closed", "settled", "unknown"]
 CandleTimeframe = Literal["1m", "5m", "15m", "1h"]
 SentimentLabel = Literal["bullish", "bearish", "neutral"]
 ConfidenceBucket = Literal["low", "medium", "high"]
+ReviewerMarketCall = Literal["UP", "DOWN", "NEUTRAL"]
 
 
 def _normalize_datetime(value: object) -> datetime:
@@ -140,12 +141,41 @@ class NewsArticle(SchemaBase):
     raw_payload: dict[str, Any] | None = None
 
 
+def normalize_reviewer_market_call(
+    value: object | None,
+    *,
+    impact_score: float | None = None,
+) -> ReviewerMarketCall:
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        aliases = {
+            "UP": "UP",
+            "ABOVE": "UP",
+            "BULLISH": "UP",
+            "DOWN": "DOWN",
+            "BELOW": "DOWN",
+            "BEARISH": "DOWN",
+            "NEUTRAL": "NEUTRAL",
+        }
+        if normalized in aliases:
+            return cast(ReviewerMarketCall, aliases[normalized])
+
+    if impact_score is not None:
+        if impact_score > 0.05:
+            return "UP"
+        if impact_score < -0.05:
+            return "DOWN"
+
+    return "NEUTRAL"
+
+
 class ArticleSentimentScore(SchemaBase):
     """Structured KimiClaw sentiment output for a single article."""
 
     article_url: HttpUrl
     model_name: str = Field(min_length=1)
     scored_at: UtcDateTime
+    market_call: ReviewerMarketCall = "NEUTRAL"
     sentiment: SentimentLabel
     relevance: float = Field(ge=0, le=1)
     impact_horizon_minutes: int = Field(gt=0, le=240)

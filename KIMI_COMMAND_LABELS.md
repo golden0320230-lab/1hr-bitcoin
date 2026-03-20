@@ -12,11 +12,20 @@ Command:
 .\.venv\Scripts\python.exe -c "from app.cli import app; app()" predict --json --save-run
 ```
 
+Optional reviewer flags:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from app.cli import app; app()" predict --json --save-run --reviewer codex --reviewer-model gpt-5
+.\.venv\Scripts\python.exe -c "from app.cli import app; app()" predict --json --save-run --reviewer claude --reviewer-model claude-sonnet-4-6
+```
+
 Notes:
 - This runs Kalshi market discovery, Coinbase price data, and news ingestion.
 - The prediction label is returned as `ABOVE` or `BELOW`.
 - For the 15-minute market, treat `ABOVE` as `UP` and `BELOW` as `DOWN`.
+- If reviewer scoring is enabled, the output also includes a clean reviewer news call in `news_review_summary.market_call`.
 - `--save-run` stores the run so `Explain run` can inspect it afterward.
+- `--reviewer` can be `kimiclaw`, `codex`, or `claude`.
 
 ## `get info`
 

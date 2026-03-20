@@ -119,6 +119,7 @@ class DuckDBStorage:
                 article_url VARCHAR NOT NULL,
                 model_name VARCHAR NOT NULL,
                 scored_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                market_call VARCHAR NOT NULL DEFAULT 'NEUTRAL',
                 sentiment VARCHAR NOT NULL,
                 relevance DOUBLE NOT NULL,
                 impact_horizon_minutes INTEGER NOT NULL,
@@ -128,6 +129,19 @@ class DuckDBStorage:
                 raw_response VARCHAR,
                 UNIQUE (article_url, model_name, scored_at)
             )
+            """
+        )
+        self.connection.execute(
+            """
+            ALTER TABLE news_scores
+            ADD COLUMN IF NOT EXISTS market_call VARCHAR DEFAULT 'NEUTRAL'
+            """
+        )
+        self.connection.execute(
+            """
+            UPDATE news_scores
+            SET market_call = 'NEUTRAL'
+            WHERE market_call IS NULL
             """
         )
         self.connection.execute(
@@ -564,6 +578,7 @@ class DuckDBStorage:
                 str(score.article_url),
                 score.model_name,
                 score.scored_at,
+                score.market_call,
                 score.sentiment,
                 score.relevance,
                 score.impact_horizon_minutes,
@@ -583,6 +598,7 @@ class DuckDBStorage:
                 article_url,
                 model_name,
                 scored_at,
+                market_call,
                 sentiment,
                 relevance,
                 impact_horizon_minutes,
@@ -591,7 +607,7 @@ class DuckDBStorage:
                 reason,
                 raw_response
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING
             """,
             rows,

@@ -49,7 +49,7 @@ def test_score_article_parses_valid_openai_style_json_and_stores_result(tmp_path
                     {
                         "message": {
                             "content": (
-                                '{"sentiment":"bullish","relevance":0.82,'
+                                '{"market_call":"UP","sentiment":"bullish","relevance":0.82,'
                                 '"impact_horizon_minutes":45,"impact_score":0.35,'
                                 '"confidence":0.74,"reason":"ETF inflow headline may support BTC."}'
                             )
@@ -65,6 +65,7 @@ def test_score_article_parses_valid_openai_style_json_and_stores_result(tmp_path
     try:
         score = client.score_article(_article())
 
+        assert score.market_call == "UP"
         assert score.sentiment == "bullish"
         assert score.relevance == 0.82
         assert score.impact_score == 0.35
@@ -88,6 +89,7 @@ def test_score_article_falls_back_to_neutral_on_invalid_json() -> None:
     try:
         score = client.score_article(_article())
 
+        assert score.market_call == "NEUTRAL"
         assert score.sentiment == "neutral"
         assert score.impact_score == 0.0
         assert "fallback" in score.reason.lower()
@@ -133,8 +135,10 @@ def test_build_prompt_sanitizes_html_and_truncates_untrusted_article_content() -
 
         assert "<script>" not in prompt
         assert "malicious()" not in prompt
-        assert "Title: Bitcoin headline" in prompt
-        assert "Source: Example Wire" in prompt
-        assert len(prompt) < 1_000
+        assert '"title": "Bitcoin headline' in prompt
+        assert '"source": "Example Wire"' in prompt
+        assert '"url": "https://example.com/unsafe"' in prompt
+        assert '"market_call": "UP" | "DOWN" | "NEUTRAL"' in prompt
+        assert len(prompt) < 1_700
     finally:
         client.close()

@@ -113,7 +113,16 @@ Fetch recent BTC news:
 uv run btc-kalshi news --limit 10
 uv run btc-kalshi news --limit 10 --json
 uv run btc-kalshi news --limit 10 --no-score
+uv run btc-kalshi news --limit 5 --reviewer codex --reviewer-model gpt-5
+uv run btc-kalshi news --limit 5 --reviewer claude --reviewer-model claude-sonnet-4-6
 ```
+
+Reviewer options:
+- `--reviewer kimiclaw|codex|claude` selects the news reviewer
+- `--reviewer-model` optionally overrides the model used by the selected reviewer
+- scored human output is rendered as a simplified review table with a clean `UP`/`DOWN`/`NEUTRAL` call, reviewer, sentiment, impact, confidence, and reason
+- scored JSON output includes `review_summary.market_call` for the aggregate news call
+- `codex` and `claude` are capped to the newest 5 articles per run to avoid slow or expensive local CLI fan-out
 
 Run the research prediction:
 
@@ -122,9 +131,12 @@ uv run btc-kalshi predict
 uv run btc-kalshi predict --json
 uv run btc-kalshi predict --news-limit 20
 uv run btc-kalshi predict --no-news
+uv run btc-kalshi predict --reviewer codex --reviewer-model gpt-5
 uv run btc-kalshi predict --verbose
 uv run btc-kalshi predict --save-run
 ```
+
+When news scoring is enabled, `predict` also returns an aggregate reviewer news call in `news_review_summary.market_call` and prints it in human output.
 
 Train the local baseline model artifact:
 

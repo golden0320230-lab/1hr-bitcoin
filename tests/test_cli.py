@@ -11,6 +11,7 @@ import app.cli as cli
 from app.cli import app
 from app.config import Settings
 from app.schemas import (
+    ArticleSentimentScore,
     BTCCandle,
     FeatureVector,
     KalshiMarket,
@@ -373,6 +374,128 @@ def test_news_command_outputs_articles(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "Bitcoin ETF inflows rise" in result.output
+
+
+def test_news_command_supports_codex_reviewer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH="./data/test_cli_news_codex.duckdb",
+            MODEL_PATH="./models/test_cli_news_codex.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(
+        cli.NewsClient,
+        "fetch_recent_articles",
+        lambda self, limit, lookback_hours: [
+            NewsArticle(
+                title="Bitcoin ETF inflows rise",
+                url="https://example.com/etf",
+                source="Example Wire",
+                published_at="2026-03-19T18:30:00Z",
+                summary="Fresh inflow headline",
+            )
+        ],
+    )
+
+    def _score(runtime, articles, *, reviewer="kimiclaw", reviewer_model=None):
+        assert reviewer == "codex"
+        assert reviewer_model == "gpt-5"
+        return (
+            [
+                ArticleSentimentScore(
+                    article_url="https://example.com/etf",
+                    model_name="gpt-5",
+                    scored_at="2026-03-19T18:35:00Z",
+                    market_call="UP",
+                    sentiment="bullish",
+                    relevance=0.8,
+                    impact_horizon_minutes=45,
+                    impact_score=0.35,
+                    confidence=0.7,
+                    reason="ETF flow headline is modestly supportive.",
+                )
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(cli, "_score_articles_with_warnings", _score)
+
+    result = runner.invoke(
+        app,
+        ["news", "--limit", "1", "--reviewer", "codex", "--reviewer-model", "gpt-5"],
+    )
+
+    assert result.exit_code == 0
+    assert "Reviewer market call: UP" in result.output
+    assert "BTC News Review" in result.output
+    assert "Call" in result.output
+    assert "UP" in result.output
+    assert "gpt-5" in result.output
+    assert "bullish" in result.output
+
+
+def test_news_json_includes_review_summary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(
+            APP_ENV="test",
+            DB_PATH="./data/test_cli_news_summary.duckdb",
+            MODEL_PATH="./models/test_cli_news_summary.pkl",
+            KIMICLAW_BASE_URL="https://replace-me.example.com",
+            KIMICLAW_API_KEY="replace-me",
+            KIMICLAW_MODEL="replace-me",
+        ),
+    )
+    monkeypatch.setattr(
+        cli.NewsClient,
+        "fetch_recent_articles",
+        lambda self, limit, lookback_hours: [
+            NewsArticle(
+                title="Bitcoin ETF inflows rise",
+                url="https://example.com/etf",
+                source="Example Wire",
+                published_at="2026-03-19T18:30:00Z",
+                summary="Fresh inflow headline",
+            )
+        ],
+    )
+
+    def _score(runtime, articles, *, reviewer="kimiclaw", reviewer_model=None):
+        return (
+            [
+                ArticleSentimentScore(
+                    article_url="https://example.com/etf",
+                    model_name="gpt-5",
+                    scored_at="2026-03-19T18:35:00Z",
+                    market_call="UP",
+                    sentiment="bullish",
+                    relevance=0.8,
+                    impact_horizon_minutes=45,
+                    impact_score=0.35,
+                    confidence=0.7,
+                    reason="ETF flow headline is modestly supportive.",
+                )
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(cli, "_score_articles_with_warnings", _score)
+
+    result = runner.invoke(
+        app,
+        ["news", "--limit", "1", "--reviewer", "codex", "--reviewer-model", "gpt-5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert "\"review_summary\"" in result.output
+    assert "\"market_call\": \"UP\"" in result.output
 
 
 def test_news_command_surfaces_partial_source_warning(monkeypatch) -> None:
